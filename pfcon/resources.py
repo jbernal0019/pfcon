@@ -97,8 +97,12 @@ class JobList(Resource):
         job_id = args.jid.lstrip('/')
         logger.info(f'Received job {job_id}')
 
-        # process data
+        input_dir, output_dir, d_info = self._process_data(args, job_id)
+        d_compute = self._process_compute(args, job_id, input_dir, output_dir)
 
+        return {'data': d_info, 'compute': d_compute}, 201
+
+    def _process_data(self, args, job_id):
         input_dir = 'key-' + job_id + '/incoming'
         output_dir = 'key-' + job_id + '/outgoing'
 
@@ -106,67 +110,70 @@ class JobList(Resource):
             # only the first input dir is considered here
             input_dir = args.input_dirs[0].strip('/')
             output_dir = args.output_dir.strip('/')
-            incoming_dir = os.path.join(self.storebase_mount, input_dir)
+            d_info = self._store_filesystem_data(job_id, input_dir)
+            return input_dir, output_dir, d_info
 
-            storage = FileSystemStorage(app.config)
-            try:
-                d_info = storage.store_data(job_id, incoming_dir, None)
-            except Exception as e:
-                logger.error(f'Error while accessing files from shared filesystem '
-                             f'for job {job_id}, detail: {str(e)}')
-                abort(400,
-                      message='input_dirs: Error accessing files from shared filesystem')
+        incoming_dir = os.path.join(self.storebase_mount, input_dir)
+        os.makedirs(incoming_dir, exist_ok=True)
+
+        if self.pfcon_innetwork:
+            if self.storage_env == 'swift':
+                d_info = self._store_swift_data(args, job_id, incoming_dir, output_dir)
+            elif self.storage_env == 'fslink':
+                output_dir = args.output_dir.strip('/')
+                d_info = self._store_fslink_data(args, job_id, incoming_dir, output_dir)
         else:
-            incoming_dir = os.path.join(self.storebase_mount, input_dir)
-            os.makedirs(incoming_dir, exist_ok=True)
+            if self.storage_env == 'zipfile':
+                d_info = self._store_zipfile_data(job_id, incoming_dir, output_dir)
 
-            if self.pfcon_innetwork:
-                if self.storage_env == 'swift':
-                    outgoing_dir = os.path.join(self.storebase_mount, output_dir)
-                    os.makedirs(outgoing_dir, exist_ok=True)
+        logger.info(f'Successfully stored job {job_id} input data')
+        return input_dir, output_dir, d_info
 
-                    storage = SwiftStorage(app.config)
-                    try:
-                        d_info = storage.store_data(
-                            job_id, incoming_dir, args.input_dirs,
-                            job_output_path=args.output_dir.strip('/')
-                        )
-                    except ClientException as e:
-                        logger.error(f'Error while fetching files from swift and '
-                                     f'storing job {job_id} data, detail: {str(e)}')
-                        abort(400,
-                              message='input_dirs: Error fetching files from swift')
+    def _store_filesystem_data(self, job_id, input_dir):
+        incoming_dir = os.path.join(self.storebase_mount, input_dir)
+        storage = FileSystemStorage(app.config)
+        try:
+            return storage.store_data(job_id, incoming_dir, None)
+        except Exception as e:
+            logger.error(f'Error while accessing files from shared filesystem '
+                         f'for job {job_id}, detail: {str(e)}')
+            abort(400, message='input_dirs: Error accessing files from shared filesystem')
 
-                elif self.storage_env == 'fslink':
-                    output_dir = args.output_dir.strip('/')
-                    storage = FSLinkStorage(app.config)
-                    try:
-                        d_info = storage.store_data(job_id, incoming_dir, args.input_dirs,
-                                                    job_output_path=output_dir)
-                    except Exception as e:
-                        logger.error(f'Error while accessing files from shared '
-                                     f'filesystem and storing job {job_id} data, '
-                                     f'detail: {str(e)}')
-                        abort(400, message='input_dirs: Error copying files from shared '
-                                           'filesystem')
-            else:
-                if self.storage_env == 'zipfile':
-                    outgoing_dir = os.path.join(self.storebase_mount, output_dir)
-                    os.makedirs(outgoing_dir, exist_ok=True)
+    def _store_swift_data(self, args, job_id, incoming_dir, output_dir):
+        outgoing_dir = os.path.join(self.storebase_mount, output_dir)
+        os.makedirs(outgoing_dir, exist_ok=True)
+        storage = SwiftStorage(app.config)
+        try:
+            return storage.store_data(job_id, incoming_dir, args.input_dirs,
+                                      job_output_path=args.output_dir.strip('/'))
+        except ClientException as e:
+            logger.error(f'Error while fetching files from swift and '
+                         f'storing job {job_id} data, detail: {str(e)}')
+            abort(400, message='input_dirs: Error fetching files from swift')
 
-                    storage = ZipFileStorage(app.config)
-                    data_file = request.files['data_file']
-                    try:
-                        d_info = storage.store_data(job_id, incoming_dir, data_file)
-                    except zipfile.BadZipFile as e:
-                        logger.error(f'Error while decompressing and storing '
-                                     f'job {job_id} data, detail: {str(e)}')
-                        abort(400, message='data_file: Bad zip file')
+    def _store_fslink_data(self, args, job_id, incoming_dir, output_dir):
+        storage = FSLinkStorage(app.config)
+        try:
+            return storage.store_data(job_id, incoming_dir, args.input_dirs,
+                                      job_output_path=output_dir)
+        except Exception as e:
+            logger.error(f'Error while accessing files from shared filesystem and '
+                         f'storing job {job_id} data, detail: {str(e)}')
+            abort(400, message='input_dirs: Error copying files from shared filesystem')
 
-            logger.info(f'Successfully stored job {job_id} input data')
+    def _store_zipfile_data(self, job_id, incoming_dir, output_dir):
+        outgoing_dir = os.path.join(self.storebase_mount, output_dir)
+        os.makedirs(outgoing_dir, exist_ok=True)
+        storage = ZipFileStorage(app.config)
+        data_file = request.files['data_file']
+        try:
+            return storage.store_data(job_id, incoming_dir, data_file)
+        except zipfile.BadZipFile as e:
+            logger.error(f'Error while decompressing and storing '
+                         f'job {job_id} data, detail: {str(e)}')
+            abort(400, message='data_file: Bad zip file')
 
-        # process compute
-
+    def _process_compute(self, args, job_id, input_dir, output_dir):
         if app.config.get('ENABLE_HOME_WORKAROUND'):
             args.env.append('HOME=/tmp')
 
@@ -209,7 +216,7 @@ class JobList(Resource):
         logger.info(f'Successful job {job_id} schedule response from '
                     f'{self.container_env}: {job_info}')
 
-        d_compute = {
+        return {
             'jid': job_id,
             'image': job_info.image,
             'cmd': job_info.cmd,
@@ -218,7 +225,6 @@ class JobList(Resource):
             'timestamp': job_info.timestamp,
             'logs': ''
         }
-        return {'data': d_info, 'compute': d_compute}, 201
 
     def _validate_data(self, args):
         if self.pfcon_innetwork:
