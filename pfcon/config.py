@@ -6,7 +6,7 @@ from environs import Env
 
 from .storage.swiftmanager import SwiftManager
 from .compute.memsize import Memsize
-from .compute._helpers import get_storebase_from_docker
+from .compute._helpers import get_storebase_from_docker, get_image_from_pfcon
 
 
 pkg = Distribution.from_name(__package__)
@@ -60,10 +60,12 @@ class Config:
         if self.COMPUTE_VOLUME_TYPE == 'host':
             self.STOREBASE = env('STOREBASE')
 
+        self.PFCON_SELECTOR = env('PFCON_SELECTOR', 'org.chrisproject.role=pfcon')
+
         if self.COMPUTE_VOLUME_TYPE == 'docker_local_volume':
-            pfcon_selector = env('PFCON_SELECTOR', 'org.chrisproject.role=pfcon')
             self.STOREBASE = get_storebase_from_docker(self.STOREBASE_MOUNT,
-                                                       pfcon_selector, self.VOLUME_NAME)
+                                                       self.PFCON_SELECTOR,
+                                                       self.VOLUME_NAME)
 
         if self.COMPUTE_VOLUME_TYPE == 'kubernetes_pvc':
             if not self.VOLUME_NAME:
@@ -96,6 +98,11 @@ class Config:
             # In the above config code for swarm, docker env variables are intercepted pointlessly.
             # To configure Docker Engine/Podman, use the standard env variables for the Docker client.
             pass
+
+        self.PFCON_COPY_IMAGE = env('PFCON_COPY_IMAGE', None)
+        if self.PFCON_COPY_IMAGE is None and self.STORAGE_ENV in ('fslink', 'swift'):
+            if self.CONTAINER_ENV == 'docker':
+                self.PFCON_COPY_IMAGE = get_image_from_pfcon(self.PFCON_SELECTOR)
 
         self.env = env
 

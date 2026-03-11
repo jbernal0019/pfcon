@@ -113,21 +113,23 @@ class TestJobList(ResourceTests):
         self.assertEqual(response.status_code, 201)
         self.assertIn('compute', response.json)
         self.assertIn('data', response.json)
-        self.assertEqual(response.json['data']['nfiles'], 1)
+        # async copy: files are fetched by copy container, data is empty on POST
+        self.assertEqual(response.json['data'], {})
 
         with self.app.test_request_context():
-            compute_mgr = get_compute_mgr(self.container_env)
+            job_url = url_for('api.job', job_id=job_id)
 
-            for _ in range(10):
-                time.sleep(3)
-                job = compute_mgr.get_job(job_id)
-                job_info = compute_mgr.get_job_info(job)
-                if job_info.status.value == 'finishedSuccessfully': break
+        # Poll via API: GET triggers copy→main job transition once copy finishes
+        for _ in range(30):
+            time.sleep(3)
+            response = self.client.get(job_url, headers=self.headers)
+            if response.json['compute']['status'] == 'finishedSuccessfully':
+                break
 
-            self.assertEqual(job_info.status.value, 'finishedSuccessfully')
+        self.assertEqual(response.json['compute']['status'], 'finishedSuccessfully')
 
-            # cleanup swarm job
-            compute_mgr.remove_job(job)
+        # cleanup both copy and main job
+        self.client.delete(job_url, headers=self.headers)
 
     def test_post_with_chris_links(self):
         job_id = 'chris-jid-1'
@@ -165,23 +167,25 @@ class TestJobList(ResourceTests):
         self.assertEqual(response.status_code, 201)
         self.assertIn('compute', response.json)
         self.assertIn('data', response.json)
-        self.assertEqual(response.json['data']['nfiles'], 2)
+        # async copy: files are fetched by copy container, data is empty on POST
+        self.assertEqual(response.json['data'], {})
 
         with self.app.test_request_context():
-            compute_mgr = get_compute_mgr(self.container_env)
+            job_url = url_for('api.job', job_id=job_id)
 
-            for _ in range(10):
-                time.sleep(3)
-                job = compute_mgr.get_job(job_id)
-                job_info = compute_mgr.get_job_info(job)
-                if job_info.status.value == 'finishedSuccessfully': break
+        # Poll via API: GET triggers copy→main job transition once copy finishes
+        for _ in range(30):
+            time.sleep(3)
+            response = self.client.get(job_url, headers=self.headers)
+            if response.json['compute']['status'] == 'finishedSuccessfully':
+                break
 
-            self.assertEqual(job_info.status.value, 'finishedSuccessfully')
-            self.assertTrue(os.path.isfile(
-                f'{self.fs_output_path}/home_bob/PIPELINES_bob/lopipeline.yml'))
+        self.assertEqual(response.json['compute']['status'], 'finishedSuccessfully')
+        self.assertTrue(os.path.isfile(
+            f'{self.fs_output_path}/home_bob/PIPELINES_bob/lopipeline.yml'))
 
-            # cleanup swarm job
-            compute_mgr.remove_job(job)
+        # cleanup both copy and main job
+        self.client.delete(job_url, headers=self.headers)
 
 
 class TestJob(ResourceTests):

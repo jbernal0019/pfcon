@@ -1,4 +1,5 @@
 
+import json
 import os
 import logging
 import zipfile
@@ -14,11 +15,12 @@ from .storage.zip_file_storage import ZipFileStorage
 from .storage.swift_storage import SwiftStorage
 from .storage.filesystem_storage import FileSystemStorage
 from .storage.fslink_storage import FSLinkStorage
-from .compute.abstractmgr import ManagerException
+from .compute.abstractmgr import ManagerException, JobStatus
 from .compute.container_user import ContainerUser
 from .compute.dockermgr import DockerManager
 from .compute.kubernetesmgr import KubernetesManager
 from .compute.swarmmgr import SwarmManager
+from .compute._helpers import connect_to_pfcon_networks
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,10 @@ class JobList(Resource):
 
         job_id = args.jid.lstrip('/')
         logger.info(f'Received job {job_id}')
+
+        if self.pfcon_innetwork and self.storage_env in ('fslink', 'swift'):
+            d_compute = self._schedule_copy_job(args, job_id)
+            return {'data': {}, 'compute': d_compute}, 201
 
         input_dir, output_dir, d_info = self._process_data(args, job_id)
         d_compute = self._process_compute(args, job_id, input_dir, output_dir)
@@ -226,6 +232,143 @@ class JobList(Resource):
             'logs': ''
         }
 
+    def _schedule_copy_job(self, args, job_id):
+        """
+        Schedule an async copy container instead of copying files synchronously.
+        Saves request parameters to disk so that Job.get can later schedule the
+        main plugin container once the copy has finished.
+        Works for both fslink and swift storage, and for docker and kubernetes.
+        """
+        key_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
+        incoming_dir = os.path.join(key_dir, 'incoming')
+        os.makedirs(incoming_dir, exist_ok=True)
+
+        # Save request parameters for later use by Job.get
+        params = {
+            'jid': job_id,
+            'storage_env': self.storage_env,
+            'args': args.args,
+            'args_path_flags': args.args_path_flags,
+            'auid': args.auid,
+            'number_of_workers': args.number_of_workers,
+            'cpu_limit': args.cpu_limit,
+            'memory_limit': args.memory_limit,
+            'gpu_limit': args.gpu_limit,
+            'image': args.image,
+            'entrypoint': args.entrypoint,
+            'type': args.type,
+            'env': args.env,
+            'input_dirs': args.input_dirs,
+            'output_dir': args.output_dir,
+        }
+        params_file = os.path.join(key_dir, 'job_params.json')
+        with open(params_file, 'w') as f:
+            json.dump(params, f)
+
+        copy_image = app.config.get('PFCON_COPY_IMAGE')
+        if not copy_image:
+            abort(500, message='PFCON_COPY_IMAGE must be configured for '
+                               'async copy jobs')
+
+        # Build the copy container command per scheduler type:
+        #   - kubernetes overrides ENTRYPOINT, so we must prefix /entrypoint.sh
+        #   - docker dev image has no entrypoint, needs pixi run
+        #   - docker prod image has ENTRYPOINT=/entrypoint.sh, CMD is enough
+        worker_cmd = ['python', '-m', 'pfcon.copy_worker',
+                      self.str_app_container_outputdir]
+        if self.container_env in ('kubernetes', 'openshift'):
+            copy_cmd = ['/entrypoint.sh'] + worker_cmd
+        elif os.environ.get('APPLICATION_MODE', 'production') != 'production':
+            copy_cmd = ['pixi', 'run'] + worker_cmd
+        else:
+            copy_cmd = worker_cmd
+
+        copy_name = job_id + '-copy'
+
+        resources_dict = {'number_of_workers': 1,
+                          'cpu_limit': args.cpu_limit,
+                          'memory_limit': args.memory_limit,
+                          'gpu_limit': 0,
+                          }
+
+        # Build mounts for the copy container.
+        # For fslink: inputdir -> shared FS root (read-only),
+        #             outputdir -> storebase key directory (read-write)
+        # For swift:  inputdir -> storebase key dir (unused but must be valid),
+        #             outputdir -> storebase key directory (read-write)
+        mounts_dict = {'inputdir_source': '',
+                       'inputdir_target': self.str_app_container_inputdir,
+                       'outputdir_source': '',
+                       'outputdir_target': self.str_app_container_outputdir
+                       }
+        key_subpath = 'key-' + job_id
+
+        if self.compute_volume_type in ('host', 'docker_local_volume'):
+            storebase = app.config.get('STOREBASE')
+            if self.storage_env == 'fslink':
+                mounts_dict['inputdir_source'] = storebase
+            else:
+                # swift: inputdir not used for reading, mount key dir
+                mounts_dict['inputdir_source'] = os.path.join(storebase,
+                                                              key_subpath)
+            mounts_dict['outputdir_source'] = os.path.join(storebase,
+                                                           key_subpath)
+        elif self.compute_volume_type == 'kubernetes_pvc':
+            if self.storage_env == 'fslink':
+                # PVC root = shared FS root; empty sub_path mounts the root
+                mounts_dict['inputdir_source'] = ''
+            else:
+                # swift: inputdir not used for reading, mount key dir
+                mounts_dict['inputdir_source'] = key_subpath
+            mounts_dict['outputdir_source'] = key_subpath
+
+        # For swift, pass credentials as env vars to the copy container
+        copy_env = []
+        if self.storage_env == 'swift':
+            swift_params = app.config.get('SWIFT_CONNECTION_PARAMS')
+            swift_container = app.config.get('SWIFT_CONTAINER_NAME')
+            copy_env = [
+                f'SWIFT_AUTH_URL={swift_params["authurl"]}',
+                f'SWIFT_USERNAME={swift_params["user"]}',
+                f'SWIFT_KEY={swift_params["key"]}',
+                f'SWIFT_CONTAINER_NAME={swift_container}',
+            ]
+
+        logger.info(f'Scheduling copy job {copy_name} on the '
+                    f'{self.container_env} cluster')
+
+        compute_mgr = get_compute_mgr(self.container_env)
+        try:
+            job = compute_mgr.schedule_job(copy_image, copy_cmd, copy_name,
+                                           resources_dict, copy_env,
+                                           self.user.get_uid(),
+                                           self.user.get_gid(), mounts_dict)
+        except ManagerException as e:
+            logger.error(f'Error from {self.container_env} while scheduling '
+                         f'copy job {copy_name}, detail: {str(e)}')
+            abort(e.status_code, message=str(e))
+
+        # For swift + docker: the copy container must reach swift_service, which
+        # is only reachable inside pfcon's Docker network.  Connect it now so
+        # that DNS resolves before the container attempts its first Swift call.
+        if self.storage_env == 'swift' and self.container_env == 'docker':
+            connect_to_pfcon_networks(job, app.config.get('PFCON_SELECTOR'))
+
+        job_info = compute_mgr.get_job_info(job)
+
+        logger.info(f'Successful copy job {copy_name} schedule response from '
+                    f'{self.container_env}: {job_info}')
+
+        return {
+            'jid': job_id,
+            'image': job_info.image,
+            'cmd': job_info.cmd,
+            'status': 'notstarted',
+            'message': 'fetchingFiles',
+            'timestamp': job_info.timestamp,
+            'logs': ''
+        }
+
     def _validate_data(self, args):
         if self.pfcon_innetwork:
             if args.input_dirs is None:
@@ -275,6 +418,13 @@ class Job(Resource):
         self.job_logs_tail = app.config.get('JOB_LOGS_TAIL')
 
     def get(self, job_id):
+        # Check if this job uses async copy (fslink or swift mode)
+        job_key_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
+        params_file = os.path.join(job_key_dir, 'job_params.json')
+
+        if os.path.isfile(params_file):
+            return self._handle_copy_phase(job_id, params_file)
+
         logger.info(f'Getting job {job_id} status from the {self.container_env} '
                     f'cluster')
         try:
@@ -301,6 +451,120 @@ class Job(Resource):
             'logs': job_logs
         }
         return {'compute': d_compute}
+
+    def _handle_copy_phase(self, job_id, params_file):
+        """
+        Handle the async copy phase. Checks the status of the copy container
+        and transitions to the main job when copy is done.
+        """
+        copy_name = job_id + '-copy'
+
+        logger.info(f'Getting copy job {copy_name} status from the '
+                    f'{self.container_env} cluster')
+
+        try:
+            copy_job = self.compute_mgr.get_job(copy_name)
+        except ManagerException:
+            # Copy container not found yet, still starting
+            return {'compute': {
+                'jid': job_id,
+                'image': '',
+                'cmd': '',
+                'status': 'notstarted',
+                'message': 'fetchingFiles',
+                'timestamp': '',
+                'logs': ''
+            }}
+
+        copy_info = self.compute_mgr.get_job_info(copy_job)
+
+        if copy_info.status in (JobStatus.started, JobStatus.notstarted):
+            return {'compute': {
+                'jid': job_id,
+                'image': copy_info.image,
+                'cmd': copy_info.cmd,
+                'status': 'notstarted',
+                'message': 'fetchingFiles',
+                'timestamp': copy_info.timestamp,
+                'logs': ''
+            }}
+
+        if copy_info.status == JobStatus.finishedWithError:
+            copy_logs = self.compute_mgr.get_job_logs(copy_job,
+                                                       self.job_logs_tail)
+            if isinstance(copy_logs, bytes):
+                copy_logs = copy_logs.decode(encoding='utf-8', errors='replace')
+            return {'compute': {
+                'jid': job_id,
+                'image': copy_info.image,
+                'cmd': copy_info.cmd,
+                'status': 'finishedWithError',
+                'message': 'fetchingFailed: ' + copy_info.message,
+                'timestamp': copy_info.timestamp,
+                'logs': copy_logs
+            }}
+
+        if copy_info.status == JobStatus.finishedSuccessfully:
+            # Atomically consume params file to prevent race conditions
+            consumed_file = params_file + '.consumed'
+            try:
+                os.rename(params_file, consumed_file)
+            except FileNotFoundError:
+                # Another request already consumed it, check main job
+                try:
+                    return self._get_main_job_status(job_id)
+                except ManagerException:
+                    # Main job not scheduled yet by the other request
+                    return {'compute': {
+                        'jid': job_id,
+                        'image': '',
+                        'cmd': '',
+                        'status': 'notstarted',
+                        'message': 'fetchingFiles',
+                        'timestamp': '',
+                        'logs': ''
+                    }}
+
+            try:
+                with open(consumed_file) as f:
+                    params = json.load(f)
+
+                d_compute = schedule_main_job(params, job_id)
+                os.remove(consumed_file)
+                return {'compute': d_compute}
+            except ManagerException as e:
+                os.remove(consumed_file)
+                logger.error(f'Error scheduling main job {job_id} after '
+                             f'copy, detail: {str(e)}')
+                abort(e.status_code, message=str(e))
+
+        # undefined status
+        return {'compute': {
+            'jid': job_id,
+            'image': copy_info.image,
+            'cmd': copy_info.cmd,
+            'status': copy_info.status.value,
+            'message': copy_info.message,
+            'timestamp': copy_info.timestamp,
+            'logs': ''
+        }}
+
+    def _get_main_job_status(self, job_id):
+        """Get the status of the main plugin container job."""
+        job = self.compute_mgr.get_job(job_id)
+        job_info = self.compute_mgr.get_job_info(job)
+        job_logs = self.compute_mgr.get_job_logs(job, self.job_logs_tail)
+        if isinstance(job_logs, bytes):
+            job_logs = job_logs.decode(encoding='utf-8', errors='replace')
+        return {'compute': {
+            'jid': job_id,
+            'image': job_info.image,
+            'cmd': job_info.cmd,
+            'status': job_info.status.value,
+            'message': job_info.message,
+            'timestamp': job_info.timestamp,
+            'logs': job_logs
+        }}
 
     def delete(self, job_id):
         storage = None
@@ -330,10 +594,24 @@ class Job(Resource):
                         'because config.REMOVE_JOBS=no')
             return '', 204
 
+        # Remove copy container if it exists
+        try:
+            copy_job = self.compute_mgr.get_job(job_id + '-copy')
+            self.compute_mgr.remove_job(copy_job)
+            logger.info(f'Successfully removed copy job {job_id}-copy from '
+                        f'remote compute')
+        except ManagerException:
+            pass
+
         logger.info(f'Deleting job {job_id} from {self.container_env}')
         try:
             job = self.compute_mgr.get_job(job_id)
         except ManagerException as e:
+            if self.pfcon_innetwork and self.storage_env in ('fslink', 'swift'):
+                # Main job may not exist yet if still in copy phase
+                logger.info(f'Main job {job_id} not found (may be in copy '
+                            f'phase)')
+                return '', 204
             abort(e.status_code, message=str(e))
 
         self.compute_mgr.remove_job(job)  # remove job from compute cluster
@@ -507,3 +785,74 @@ def get_compute_mgr(container_env):
     elif container_env == 'cromwell':
         raise ValueError('cromwell not supported')
     return compute_mgr
+
+
+def schedule_main_job(params, job_id):
+    """
+    Schedule the main plugin container job from saved parameters.
+    Called by Job.get when the copy phase has finished successfully.
+    """
+    container_env = app.config.get('CONTAINER_ENV')
+    compute_volume_type = app.config.get('COMPUTE_VOLUME_TYPE')
+    user = ContainerUser.parse(app.config.get('CONTAINER_USER'))
+
+    env = list(params['env'])
+    if app.config.get('ENABLE_HOME_WORKAROUND'):
+        env.append('HOME=/tmp')
+
+    inputdir = '/share/incoming'
+    outputdir = '/share/outgoing'
+
+    cmd = list(params['entrypoint']) + localize_path_args(
+        list(params['args']), params['args_path_flags'], inputdir)
+    if params['type'] == 'ds':
+        cmd.append(inputdir)
+    cmd.append(outputdir)
+
+    storage_env = params['storage_env']
+
+    input_dir = 'key-' + job_id + '/incoming'
+    if storage_env == 'swift':
+        output_dir = 'key-' + job_id + '/outgoing'
+    else:
+        output_dir = params['output_dir'].strip('/')
+
+    resources_dict = {'number_of_workers': params['number_of_workers'],
+                      'cpu_limit': params['cpu_limit'],
+                      'memory_limit': params['memory_limit'],
+                      'gpu_limit': params['gpu_limit'],
+                      }
+    mounts_dict = {'inputdir_source': '',
+                   'inputdir_target': inputdir,
+                   'outputdir_source': '',
+                   'outputdir_target': outputdir
+                   }
+
+    if compute_volume_type in ('host', 'docker_local_volume'):
+        storebase = app.config.get('STOREBASE')
+        mounts_dict['inputdir_source'] = os.path.join(storebase, input_dir)
+        mounts_dict['outputdir_source'] = os.path.join(storebase, output_dir)
+    elif compute_volume_type == 'kubernetes_pvc':
+        mounts_dict['inputdir_source'] = input_dir
+        mounts_dict['outputdir_source'] = output_dir
+
+    logger.info(f'Scheduling main job {job_id} on the {container_env} cluster')
+
+    compute_mgr = get_compute_mgr(container_env)
+    job = compute_mgr.schedule_job(params['image'], cmd, job_id, resources_dict,
+                                   env, user.get_uid(), user.get_gid(),
+                                   mounts_dict)
+    job_info = compute_mgr.get_job_info(job)
+
+    logger.info(f'Successful main job {job_id} schedule response from '
+                f'{container_env}: {job_info}')
+
+    return {
+        'jid': job_id,
+        'image': job_info.image,
+        'cmd': job_info.cmd,
+        'status': job_info.status.value,
+        'message': job_info.message,
+        'timestamp': job_info.timestamp,
+        'logs': ''
+    }
