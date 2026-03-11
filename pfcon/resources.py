@@ -270,18 +270,10 @@ class JobList(Resource):
             abort(500, message='PFCON_COPY_IMAGE must be configured for '
                                'async copy jobs')
 
-        # Build the copy container command per scheduler type:
-        #   - kubernetes overrides ENTRYPOINT, so we must prefix /entrypoint.sh
-        #   - docker dev image has no entrypoint, needs pixi run
-        #   - docker prod image has ENTRYPOINT=/entrypoint.sh, CMD is enough
-        worker_cmd = ['python', '-m', 'pfcon.copy_worker',
-                      self.str_app_container_outputdir]
-        if self.container_env in ('kubernetes', 'openshift'):
-            copy_cmd = ['/entrypoint.sh'] + worker_cmd
-        elif os.environ.get('APPLICATION_MODE', 'production') != 'production':
-            copy_cmd = ['pixi', 'run'] + worker_cmd
-        else:
-            copy_cmd = worker_cmd
+        # The dedicated copy job image has Python directly available,
+        # so the command is the same for all environments.
+        copy_cmd = ['python', '-m', 'pfcon.copy_worker',
+                    self.str_app_container_outputdir]
 
         copy_name = job_id + '-copy'
 

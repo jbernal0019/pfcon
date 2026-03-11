@@ -9,6 +9,12 @@
 #
 
 services:
+  copyjob:
+    image: ghcr.io/fnndsc/pfconcpjob
+    build:
+      context: ..
+      dockerfile: copyjob.Dockerfile
+
   pfcon:
     image: localhost:5000/fnndsc/pfcon:dev
     container_name: pfcon

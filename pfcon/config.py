@@ -6,7 +6,7 @@ from environs import Env
 
 from .storage.swiftmanager import SwiftManager
 from .compute.memsize import Memsize
-from .compute._helpers import get_storebase_from_docker, get_image_from_pfcon
+from .compute._helpers import get_storebase_from_docker
 
 
 pkg = Distribution.from_name(__package__)
@@ -99,10 +99,7 @@ class Config:
             # To configure Docker Engine/Podman, use the standard env variables for the Docker client.
             pass
 
-        self.PFCON_COPY_IMAGE = env('PFCON_COPY_IMAGE', None)
-        if self.PFCON_COPY_IMAGE is None and self.STORAGE_ENV in ('fslink', 'swift'):
-            if self.CONTAINER_ENV == 'docker':
-                self.PFCON_COPY_IMAGE = get_image_from_pfcon(self.PFCON_SELECTOR)
+        self.PFCON_COPY_IMAGE = env('PFCON_COPY_IMAGE', 'ghcr.io/fnndsc/pfconcpjob')
 
         self.env = env
 
