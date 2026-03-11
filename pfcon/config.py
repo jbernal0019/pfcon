@@ -108,7 +108,6 @@ class DevConfig(Config):
     """
     Development configuration
     """
-    ENV = 'development'
     DEBUG = True
     TESTING = True
 
@@ -175,7 +174,6 @@ class ProdConfig(Config):
     """
     Production configuration
     """
-    ENV = 'production'
 
     def __init__(self):
         super().__init__()
