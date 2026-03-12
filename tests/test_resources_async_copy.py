@@ -7,10 +7,10 @@ required.
 
 The async copy flow is:
   POST  → schedules a "<job_id>-copy" container; saves job_params.json;
-           returns immediately with data={}, status='beforeCreate'
-  GET   → while copy not found: returns status='beforeCreate',
+           returns immediately with data={}, status='notCreated'
+  GET   → while copy not found: returns status='notCreated',
            message='copyNotStarted'
-        → while copy running:  returns status='beforeCreate', message='copying'
+        → while copy running:  returns status='notCreated', message='copying'
         → when copy succeeds:  schedules the main plugin container, removes
            job_params.json, returns main-job status
         → when copy fails:     returns status='undefined', message='copyFailed'
@@ -151,7 +151,7 @@ class TestAsyncCopyStateMachine(TestCase):
             'input_dirs': ['home/foo/feed/input'],
             'output_dir': 'home/foo/feed/output',
         }
-        copy_job_info = _make_job_info(JobStatus.notstarted,
+        copy_job_info = _make_job_info(JobStatus.notStarted,
                                        cmd='python -m pfcon.copy_worker /share/outgoing')
 
         with mock.patch('pfcon.resources.DockerManager') as MockDockerManager:
@@ -166,7 +166,7 @@ class TestAsyncCopyStateMachine(TestCase):
         # Async copy: no file count on POST
         self.assertEqual(response.json['data'], {})
         self.assertIn('compute', response.json)
-        self.assertEqual(response.json['compute']['status'], 'beforeCreate')
+        self.assertEqual(response.json['compute']['status'], 'notCreated')
 
         # job_params.json must have been written with correct contents
         params_file = os.path.join(self.tmpdir, 'key-' + job_id, 'job_params.json')
@@ -216,7 +216,7 @@ class TestAsyncCopyStateMachine(TestCase):
     def test_get_copy_container_not_found_returns_before_create(self):
         """
         GET while copy container is not yet visible returns
-        status='beforeCreate', message='copyNotStarted'.
+        status='notCreated', message='copyNotStarted'.
         """
         job_id = 'async-get-1'
         self._write_params_file(job_id)
@@ -230,14 +230,14 @@ class TestAsyncCopyStateMachine(TestCase):
 
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
-        self.assertEqual(compute['status'], 'beforeCreate')
+        self.assertEqual(compute['status'], 'notCreated')
         self.assertEqual(compute['message'], 'copyNotStarted')
         self.assertEqual(compute['jid'], job_id)
 
     def test_get_copy_container_running_returns_before_create(self):
         """
         GET while copy container status is 'started' returns
-        status='beforeCreate', message='copying'.
+        status='notCreated', message='copying'.
         """
         job_id = 'async-get-2'
         self._write_params_file(job_id)
@@ -252,13 +252,13 @@ class TestAsyncCopyStateMachine(TestCase):
 
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
-        self.assertEqual(compute['status'], 'beforeCreate')
+        self.assertEqual(compute['status'], 'notCreated')
         self.assertEqual(compute['message'], 'copying')
 
-    def test_get_copy_container_notstarted_returns_before_create(self):
+    def test_get_copy_container_notStarted_returns_before_create(self):
         """
-        GET while copy container status is 'notstarted' returns
-        status='beforeCreate', message='copying'.
+        GET while copy container status is 'notStarted' returns
+        status='notCreated', message='copying'.
         """
         job_id = 'async-get-3'
         self._write_params_file(job_id)
@@ -267,13 +267,13 @@ class TestAsyncCopyStateMachine(TestCase):
         with mock.patch('pfcon.resources.DockerManager') as MockDockerManager:
             mock_mgr = MockDockerManager.return_value
             mock_mgr.get_job.return_value = 'mock_copy_job'
-            mock_mgr.get_job_info.return_value = _make_job_info(JobStatus.notstarted)
+            mock_mgr.get_job_info.return_value = _make_job_info(JobStatus.notStarted)
 
             response = self.client.get(url, headers=self.headers)
 
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
-        self.assertEqual(compute['status'], 'beforeCreate')
+        self.assertEqual(compute['status'], 'notCreated')
         self.assertEqual(compute['message'], 'copying')
 
     def test_get_copy_container_failed_returns_undefined(self):
@@ -317,7 +317,7 @@ class TestAsyncCopyStateMachine(TestCase):
             # First call → copy job info (success); second call → main job info
             mock_mgr.get_job_info.side_effect = [
                 _make_job_info(JobStatus.finishedSuccessfully),
-                _make_job_info(JobStatus.notstarted,
+                _make_job_info(JobStatus.notStarted,
                                image='fnndsc/pl-simplefsapp'),
             ]
             mock_mgr.schedule_job.return_value = 'mock_main_job'
@@ -327,7 +327,7 @@ class TestAsyncCopyStateMachine(TestCase):
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
         # Returns main-job status, not 'fetchingFiles'
-        self.assertEqual(compute['status'], 'notstarted')
+        self.assertEqual(compute['status'], 'notStarted')
         self.assertEqual(compute['jid'], job_id)
 
         # job_params.json must have been consumed and removed
@@ -355,7 +355,7 @@ class TestAsyncCopyStateMachine(TestCase):
             mock_mgr.get_job.return_value = 'mock_copy_job'
             mock_mgr.get_job_info.side_effect = [
                 _make_job_info(JobStatus.finishedSuccessfully),
-                _make_job_info(JobStatus.notstarted, image='fnndsc/pl-simpledsapp'),
+                _make_job_info(JobStatus.notStarted, image='fnndsc/pl-simpledsapp'),
             ]
             mock_mgr.schedule_job.return_value = 'mock_main_job'
 
@@ -538,7 +538,7 @@ class TestAsyncCopyStateMachine(TestCase):
                 mock_mgr.get_job.return_value = 'mock_copy_job'
                 mock_mgr.get_job_info.side_effect = [
                     _make_job_info(JobStatus.finishedSuccessfully),
-                    _make_job_info(JobStatus.notstarted,
+                    _make_job_info(JobStatus.notStarted,
                                    image='fnndsc/pl-simplefsapp'),
                 ]
                 mock_mgr.schedule_job.return_value = 'mock_main_job'

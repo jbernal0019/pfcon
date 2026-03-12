@@ -118,7 +118,7 @@ def _get_status_from(c: Container) -> JobStatus:
     if state['Running'] or state['Paused']:
         return JobStatus.started
     if state['Status'] == 'created':
-        return JobStatus.notstarted
+        return JobStatus.notStarted
     if state['OOMKilled'] or state['Dead']:
         return JobStatus.finishedWithError
     if state['Status'] == 'exited':

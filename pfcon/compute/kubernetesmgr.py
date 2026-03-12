@@ -86,7 +86,7 @@ class KubernetesManager(AbstractManager[V1Job]):
         """
         Get the job's info dictionary for a previously scheduled job object.
         """
-        status = JobStatus.notstarted
+        status = JobStatus.notStarted
         message = 'task not available yet'
         conditions = job.status.conditions
         failed = job.status.failed
@@ -100,7 +100,7 @@ class KubernetesManager(AbstractManager[V1Job]):
                         message = condition.message
                         status = JobStatus.finishedWithError
                         break
-        if status == JobStatus.notstarted:
+        if status == JobStatus.notStarted:
             if completion_time and succeeded:
                 message = 'finished'
                 status = JobStatus.finishedSuccessfully

@@ -357,7 +357,7 @@ class JobList(Resource):
             'jid': job_id,
             'image': job_info.image,
             'cmd': job_info.cmd,
-            'status': 'beforeCreate',
+            'status': 'notCreated',
             'message': 'copyNotStarted',
             'timestamp': job_info.timestamp,
             'logs': ''
@@ -472,7 +472,7 @@ class Job(Resource):
                 'jid': job_id,
                 'image': '',
                 'cmd': '',
-                'status': 'beforeCreate',
+                'status': 'notCreated',
                 'message': 'copyNotStarted',
                 'timestamp': '',
                 'logs': ''
@@ -480,12 +480,12 @@ class Job(Resource):
 
         copy_info = self.compute_mgr.get_job_info(copy_job)
 
-        if copy_info.status in (JobStatus.started, JobStatus.notstarted):
+        if copy_info.status in (JobStatus.started, JobStatus.notStarted):
             return {'compute': {
                 'jid': job_id,
                 'image': copy_info.image,
                 'cmd': copy_info.cmd,
-                'status': 'beforeCreate',
+                'status': 'notCreated',
                 'message': 'copying',
                 'timestamp': copy_info.timestamp,
                 'logs': ''
@@ -521,7 +521,7 @@ class Job(Resource):
                         'jid': job_id,
                         'image': '',
                         'cmd': '',
-                        'status': 'beforeCreate',
+                        'status': 'notCreated',
                         'message': 'copyComplete',
                         'timestamp': '',
                         'logs': ''
@@ -660,7 +660,7 @@ class Job(Resource):
 
         upload_info = self.compute_mgr.get_job_info(upload_job)
 
-        if upload_info.status in (JobStatus.started, JobStatus.notstarted):
+        if upload_info.status in (JobStatus.started, JobStatus.notStarted):
             return 'uploading'
         if upload_info.status == JobStatus.finishedSuccessfully:
             return 'uploadComplete'

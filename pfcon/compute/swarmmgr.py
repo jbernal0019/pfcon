@@ -68,7 +68,7 @@ class SwarmManager(AbstractManager[Service]):
             return JobInfo(
                 name=JobName(''), image=Image(''), cmd='', timestamp=TimeStamp(''),
                 message='task not available yet',
-                status=JobStatus.notstarted
+                status=JobStatus.notStarted
             )
 
         return JobInfo(
@@ -102,7 +102,7 @@ class SwarmManager(AbstractManager[Service]):
         """
         if state in ('new', 'allocated', 'pending', 'assigned', 'accepted', 'preparing',
                      'ready', 'starting'):
-            return JobStatus.notstarted
+            return JobStatus.notStarted
         elif state == 'running':
             return JobStatus.started
         elif state in ('failed', 'shutdown'):

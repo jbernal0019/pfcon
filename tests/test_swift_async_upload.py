@@ -585,7 +585,7 @@ class TestEndToEndAsyncUpload(SwiftAsyncUploadTests):
             # 1. Submit job
             response = self._submit_job(job_id)
             self.assertEqual(response.status_code, 201)
-            self.assertEqual(response.json['compute']['status'], 'beforeCreate')
+            self.assertEqual(response.json['compute']['status'], 'notCreated')
             self.assertEqual(response.json['compute']['message'],
                              'copyNotStarted')
 
