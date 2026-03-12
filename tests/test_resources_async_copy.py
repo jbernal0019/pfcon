@@ -7,12 +7,14 @@ required.
 
 The async copy flow is:
   POST  → schedules a "<job_id>-copy" container; saves job_params.json;
-           returns immediately with data={}
-  GET   → while copy running: returns status='notstarted', message='fetchingFiles'
-        → when copy succeeds: schedules the main plugin container, removes
+           returns immediately with data={}, status='beforeCreate'
+  GET   → while copy not found: returns status='beforeCreate',
+           message='copyNotStarted'
+        → while copy running:  returns status='beforeCreate', message='copying'
+        → when copy succeeds:  schedules the main plugin container, removes
            job_params.json, returns main-job status
-        → when copy fails:    returns status='finishedWithError'
-  DELETE→ removes copy container (if exists) and main container (if exists)
+        → when copy fails:     returns status='undefined', message='copyFailed'
+  DELETE→ removes copy, upload, and main containers (if they exist)
 """
 
 import json
@@ -164,7 +166,7 @@ class TestAsyncCopyStateMachine(TestCase):
         # Async copy: no file count on POST
         self.assertEqual(response.json['data'], {})
         self.assertIn('compute', response.json)
-        self.assertEqual(response.json['compute']['status'], 'notstarted')
+        self.assertEqual(response.json['compute']['status'], 'beforeCreate')
 
         # job_params.json must have been written with correct contents
         params_file = os.path.join(self.tmpdir, 'key-' + job_id, 'job_params.json')
@@ -211,10 +213,10 @@ class TestAsyncCopyStateMachine(TestCase):
     # GET (copy phase) tests
     # -----------------------------------------------------------------------
 
-    def test_get_copy_container_not_found_returns_fetching_files(self):
+    def test_get_copy_container_not_found_returns_before_create(self):
         """
         GET while copy container is not yet visible returns
-        status='notstarted', message='fetchingFiles'.
+        status='beforeCreate', message='copyNotStarted'.
         """
         job_id = 'async-get-1'
         self._write_params_file(job_id)
@@ -228,14 +230,14 @@ class TestAsyncCopyStateMachine(TestCase):
 
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
-        self.assertEqual(compute['status'], 'notstarted')
-        self.assertEqual(compute['message'], 'fetchingFiles')
+        self.assertEqual(compute['status'], 'beforeCreate')
+        self.assertEqual(compute['message'], 'copyNotStarted')
         self.assertEqual(compute['jid'], job_id)
 
-    def test_get_copy_container_running_returns_fetching_files(self):
+    def test_get_copy_container_running_returns_before_create(self):
         """
         GET while copy container status is 'started' returns
-        status='notstarted', message='fetchingFiles'.
+        status='beforeCreate', message='copying'.
         """
         job_id = 'async-get-2'
         self._write_params_file(job_id)
@@ -250,13 +252,13 @@ class TestAsyncCopyStateMachine(TestCase):
 
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
-        self.assertEqual(compute['status'], 'notstarted')
-        self.assertEqual(compute['message'], 'fetchingFiles')
+        self.assertEqual(compute['status'], 'beforeCreate')
+        self.assertEqual(compute['message'], 'copying')
 
-    def test_get_copy_container_notstarted_returns_fetching_files(self):
+    def test_get_copy_container_notstarted_returns_before_create(self):
         """
         GET while copy container status is 'notstarted' returns
-        status='notstarted', message='fetchingFiles'.
+        status='beforeCreate', message='copying'.
         """
         job_id = 'async-get-3'
         self._write_params_file(job_id)
@@ -271,13 +273,13 @@ class TestAsyncCopyStateMachine(TestCase):
 
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
-        self.assertEqual(compute['status'], 'notstarted')
-        self.assertEqual(compute['message'], 'fetchingFiles')
+        self.assertEqual(compute['status'], 'beforeCreate')
+        self.assertEqual(compute['message'], 'copying')
 
-    def test_get_copy_container_failed_returns_finished_with_error(self):
+    def test_get_copy_container_failed_returns_undefined(self):
         """
         GET after copy container exits with error returns
-        status='finishedWithError' and includes the copy logs.
+        status='undefined', message='copyFailed' and includes the copy logs.
         """
         job_id = 'async-get-4'
         self._write_params_file(job_id)
@@ -294,9 +296,8 @@ class TestAsyncCopyStateMachine(TestCase):
 
         self.assertEqual(response.status_code, 200)
         compute = response.json['compute']
-        self.assertEqual(compute['status'], 'finishedWithError')
-        self.assertIn('fetchingFailed', compute['message'])
-        self.assertIn('OOMKilled', compute['message'])
+        self.assertEqual(compute['status'], 'undefined')
+        self.assertEqual(compute['message'], 'copyFailed')
         self.assertEqual(compute['logs'], 'Error: container killed (OOM)')
 
     def test_get_copy_succeeded_schedules_main_job_and_removes_params(self):

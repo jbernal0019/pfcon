@@ -357,8 +357,8 @@ class JobList(Resource):
             'jid': job_id,
             'image': job_info.image,
             'cmd': job_info.cmd,
-            'status': 'notstarted',
-            'message': 'fetchingFiles',
+            'status': 'beforeCreate',
+            'message': 'copyNotStarted',
             'timestamp': job_info.timestamp,
             'logs': ''
         }
@@ -472,8 +472,8 @@ class Job(Resource):
                 'jid': job_id,
                 'image': '',
                 'cmd': '',
-                'status': 'notstarted',
-                'message': 'fetchingFiles',
+                'status': 'beforeCreate',
+                'message': 'copyNotStarted',
                 'timestamp': '',
                 'logs': ''
             }}
@@ -485,8 +485,8 @@ class Job(Resource):
                 'jid': job_id,
                 'image': copy_info.image,
                 'cmd': copy_info.cmd,
-                'status': 'notstarted',
-                'message': 'fetchingFiles',
+                'status': 'beforeCreate',
+                'message': 'copying',
                 'timestamp': copy_info.timestamp,
                 'logs': ''
             }}
@@ -500,8 +500,8 @@ class Job(Resource):
                 'jid': job_id,
                 'image': copy_info.image,
                 'cmd': copy_info.cmd,
-                'status': 'finishedWithError',
-                'message': 'fetchingFailed: ' + copy_info.message,
+                'status': 'undefined',
+                'message': 'copyFailed',
                 'timestamp': copy_info.timestamp,
                 'logs': copy_logs
             }}
@@ -521,8 +521,8 @@ class Job(Resource):
                         'jid': job_id,
                         'image': '',
                         'cmd': '',
-                        'status': 'notstarted',
-                        'message': 'fetchingFiles',
+                        'status': 'beforeCreate',
+                        'message': 'copyComplete',
                         'timestamp': '',
                         'logs': ''
                     }}
@@ -545,8 +545,8 @@ class Job(Resource):
             'jid': job_id,
             'image': copy_info.image,
             'cmd': copy_info.cmd,
-            'status': copy_info.status.value,
-            'message': copy_info.message,
+            'status': 'undefined',
+            'message': 'copyFailed',
             'timestamp': copy_info.timestamp,
             'logs': ''
         }}
@@ -665,14 +665,8 @@ class Job(Resource):
         if upload_info.status == JobStatus.finishedSuccessfully:
             return 'uploadComplete'
         if upload_info.status == JobStatus.finishedWithError:
-            upload_logs = self.compute_mgr.get_job_logs(upload_job,
-                                                        self.job_logs_tail)
-            if isinstance(upload_logs, bytes):
-                upload_logs = upload_logs.decode(encoding='utf-8',
-                                                errors='replace')
-            return f'uploadFailed: {upload_logs}'
-
-        return 'unknown'
+            return 'uploadFailed'
+        return 'uploadFailed'
 
     def delete(self, job_id):
         storage = None
