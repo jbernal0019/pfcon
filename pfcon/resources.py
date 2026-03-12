@@ -61,6 +61,8 @@ parser_auth.add_argument('pfcon_password', dest='pfcon_password', required=True)
 class JobList(Resource):
     """
     Resource representing the list of jobs running on the compute environment.
+    A job resource may actually include info about pre-copy and post-upload 
+    containers in addition to the main plugin container.
     """
 
     def __init__(self):
@@ -397,6 +399,8 @@ class JobList(Resource):
 class Job(Resource):
     """
     Resource representing a single job running on the compute environment.
+    A job resource may actually include info about pre-copy and post-upload 
+    containers in addition to the main plugin container.
     """
 
     def __init__(self):
@@ -442,6 +446,12 @@ class Job(Resource):
             'timestamp': job_info.timestamp,
             'logs': job_logs
         }
+
+        if (self.pfcon_innetwork and self.storage_env == 'swift'
+                and job_info.status in (JobStatus.finishedSuccessfully,
+                                        JobStatus.finishedWithError)):
+            d_compute['upload_status'] = self._get_upload_status(job_id)
+
         return {'compute': d_compute}
 
     def _handle_copy_phase(self, job_id, params_file):
@@ -521,7 +531,7 @@ class Job(Resource):
                 with open(consumed_file) as f:
                     params = json.load(f)
 
-                d_compute = schedule_main_job(params, job_id)
+                d_compute = self._schedule_main_job(params, job_id)
                 os.remove(consumed_file)
                 return {'compute': d_compute}
             except ManagerException as e:
@@ -541,6 +551,77 @@ class Job(Resource):
             'logs': ''
         }}
 
+    def _schedule_main_job(self, params, job_id):
+        """
+        Schedule the main plugin container job from saved parameters.
+        Called when the copy phase has finished successfully.
+        """
+        compute_volume_type = app.config.get('COMPUTE_VOLUME_TYPE')
+        user = ContainerUser.parse(app.config.get('CONTAINER_USER'))
+
+        env = list(params['env'])
+        if app.config.get('ENABLE_HOME_WORKAROUND'):
+            env.append('HOME=/tmp')
+
+        inputdir = '/share/incoming'
+        outputdir = '/share/outgoing'
+
+        cmd = list(params['entrypoint']) + localize_path_args(
+            list(params['args']), params['args_path_flags'], inputdir)
+        if params['type'] == 'ds':
+            cmd.append(inputdir)
+        cmd.append(outputdir)
+
+        storage_env = params['storage_env']
+
+        input_dir = 'key-' + job_id + '/incoming'
+        if storage_env == 'swift':
+            output_dir = 'key-' + job_id + '/outgoing'
+        else:
+            output_dir = params['output_dir'].strip('/')
+
+        resources_dict = {'number_of_workers': params['number_of_workers'],
+                          'cpu_limit': params['cpu_limit'],
+                          'memory_limit': params['memory_limit'],
+                          'gpu_limit': params['gpu_limit'],
+                          }
+        mounts_dict = {'inputdir_source': '',
+                       'inputdir_target': inputdir,
+                       'outputdir_source': '',
+                       'outputdir_target': outputdir
+                       }
+
+        if compute_volume_type in ('host', 'docker_local_volume'):
+            storebase = app.config.get('STOREBASE')
+            mounts_dict['inputdir_source'] = os.path.join(storebase, input_dir)
+            mounts_dict['outputdir_source'] = os.path.join(storebase,
+                                                           output_dir)
+        elif compute_volume_type == 'kubernetes_pvc':
+            mounts_dict['inputdir_source'] = input_dir
+            mounts_dict['outputdir_source'] = output_dir
+
+        logger.info(f'Scheduling main job {job_id} on the '
+                    f'{self.container_env} cluster')
+
+        job = self.compute_mgr.schedule_job(params['image'], cmd, job_id,
+                                            resources_dict, env,
+                                            user.get_uid(), user.get_gid(),
+                                            mounts_dict)
+        job_info = self.compute_mgr.get_job_info(job)
+
+        logger.info(f'Successful main job {job_id} schedule response from '
+                    f'{self.container_env}: {job_info}')
+
+        return {
+            'jid': job_id,
+            'image': job_info.image,
+            'cmd': job_info.cmd,
+            'status': job_info.status.value,
+            'message': job_info.message,
+            'timestamp': job_info.timestamp,
+            'logs': ''
+        }
+
     def _get_main_job_status(self, job_id):
         """Get the status of the main plugin container job."""
         job = self.compute_mgr.get_job(job_id)
@@ -548,7 +629,8 @@ class Job(Resource):
         job_logs = self.compute_mgr.get_job_logs(job, self.job_logs_tail)
         if isinstance(job_logs, bytes):
             job_logs = job_logs.decode(encoding='utf-8', errors='replace')
-        return {'compute': {
+
+        d_compute = {
             'jid': job_id,
             'image': job_info.image,
             'cmd': job_info.cmd,
@@ -556,7 +638,41 @@ class Job(Resource):
             'message': job_info.message,
             'timestamp': job_info.timestamp,
             'logs': job_logs
-        }}
+        }
+
+        if (self.pfcon_innetwork and self.storage_env == 'swift'
+                and job_info.status in (JobStatus.finishedSuccessfully,
+                                        JobStatus.finishedWithError)):
+            d_compute['upload_status'] = self._get_upload_status(job_id)
+
+        return {'compute': d_compute}
+
+    def _get_upload_status(self, job_id):
+        """
+        Check the status of the upload container for swift storage jobs.
+        Returns a status string for inclusion in the Job.get response.
+        """
+        upload_name = job_id + '-upload'
+        try:
+            upload_job = self.compute_mgr.get_job(upload_name)
+        except ManagerException:
+            return 'notStarted'
+
+        upload_info = self.compute_mgr.get_job_info(upload_job)
+
+        if upload_info.status in (JobStatus.started, JobStatus.notstarted):
+            return 'uploading'
+        if upload_info.status == JobStatus.finishedSuccessfully:
+            return 'uploadComplete'
+        if upload_info.status == JobStatus.finishedWithError:
+            upload_logs = self.compute_mgr.get_job_logs(upload_job,
+                                                        self.job_logs_tail)
+            if isinstance(upload_logs, bytes):
+                upload_logs = upload_logs.decode(encoding='utf-8',
+                                                errors='replace')
+            return f'uploadFailed: {upload_logs}'
+
+        return 'unknown'
 
     def delete(self, job_id):
         storage = None
@@ -595,6 +711,15 @@ class Job(Resource):
         except ManagerException:
             pass
 
+        # Remove upload container if it exists
+        try:
+            upload_job = self.compute_mgr.get_job(job_id + '-upload')
+            self.compute_mgr.remove_job(upload_job)
+            logger.info(f'Successfully removed upload job {job_id}-upload '
+                        f'from remote compute')
+        except ManagerException:
+            pass
+
         logger.info(f'Deleting job {job_id} from {self.container_env}')
         try:
             job = self.compute_mgr.get_job(job_id)
@@ -623,6 +748,8 @@ class JobFile(Resource):
         self.storage_env = app.config.get('STORAGE_ENV')
         self.pfcon_innetwork = app.config.get('PFCON_INNETWORK')
         self.storebase_mount = app.config.get('STOREBASE_MOUNT')
+        self.container_env = app.config.get('CONTAINER_ENV')
+        self.compute_volume_type = app.config.get('COMPUTE_VOLUME_TYPE')
 
     def get(self, job_id):
         content = b''
@@ -668,8 +795,10 @@ class JobFile(Resource):
 
                     if self.storage_env == 'swift':
                         storage = SwiftStorage(app.config)
-                        content = storage.get_data(job_id, outgoing_dir,
-                                                   job_output_path=job_output_path)
+                        content = storage.get_output_metadata(
+                            job_id, outgoing_dir,
+                            job_output_path=job_output_path)
+                        self._schedule_upload_job(job_id, job_output_path)
                         download_name = f'{job_id}.json'
                         mimetype = 'application/json'
                 else:
@@ -685,6 +814,106 @@ class JobFile(Resource):
 
         return send_file(content, download_name=download_name, as_attachment=True,
                          mimetype=mimetype)
+
+    def _schedule_upload_job(self, job_id, job_output_path):
+        """
+        Schedule an async upload container to upload output files to Swift.
+        If the upload container already exists (idempotent call), do nothing
+        unless it previously failed, in which case re-schedule it.
+        """
+        upload_name = job_id + '-upload'
+        compute_mgr = get_compute_mgr(self.container_env)
+
+        # Check if upload container already exists
+        try:
+            upload_job = compute_mgr.get_job(upload_name)
+            upload_info = compute_mgr.get_job_info(upload_job)
+
+            if upload_info.status == JobStatus.finishedWithError:
+                # Previous upload failed, remove and re-schedule
+                compute_mgr.remove_job(upload_job)
+                logger.info(f'Removed failed upload job {upload_name}, '
+                            f'will re-schedule')
+            else:
+                # Upload container already running or finished successfully
+                logger.info(f'Upload job {upload_name} already exists '
+                            f'(status: {upload_info.status.value})')
+                return
+        except ManagerException:
+            pass  # Container doesn't exist yet, proceed to schedule
+
+        # Write upload parameters to disk
+        key_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
+        params = {
+            'jid': job_id,
+            'job_output_path': job_output_path,
+        }
+        params_file = os.path.join(key_dir, 'upload_params.json')
+        with open(params_file, 'w') as f:
+            json.dump(params, f)
+
+        copy_image = app.config.get('PFCON_COPY_IMAGE')
+        if not copy_image:
+            abort(500, message='PFCON_COPY_IMAGE must be configured for '
+                               'async upload jobs')
+
+        upload_cmd = ['python', '-m', 'pfcon.upload_worker', '/share/outgoing']
+
+        resources_dict = {'number_of_workers': 1,
+                          'cpu_limit': 1000,
+                          'memory_limit': 200,
+                          'gpu_limit': 0,
+                          }
+
+        # Mount the storebase key directory as /share/outgoing
+        mounts_dict = {'inputdir_source': '',
+                       'inputdir_target': '/share/incoming',
+                       'outputdir_source': '',
+                       'outputdir_target': '/share/outgoing'
+                       }
+        key_subpath = 'key-' + job_id
+
+        if self.compute_volume_type in ('host', 'docker_local_volume'):
+            storebase = app.config.get('STOREBASE')
+            mounts_dict['inputdir_source'] = os.path.join(storebase,
+                                                          key_subpath)
+            mounts_dict['outputdir_source'] = os.path.join(storebase,
+                                                           key_subpath)
+        elif self.compute_volume_type == 'kubernetes_pvc':
+            mounts_dict['inputdir_source'] = key_subpath
+            mounts_dict['outputdir_source'] = key_subpath
+
+        # Pass Swift credentials as env vars
+        swift_params = app.config.get('SWIFT_CONNECTION_PARAMS')
+        swift_container = app.config.get('SWIFT_CONTAINER_NAME')
+        upload_env = [
+            f'SWIFT_AUTH_URL={swift_params["authurl"]}',
+            f'SWIFT_USERNAME={swift_params["user"]}',
+            f'SWIFT_KEY={swift_params["key"]}',
+            f'SWIFT_CONTAINER_NAME={swift_container}',
+        ]
+
+        user = ContainerUser.parse(app.config.get('CONTAINER_USER'))
+
+        logger.info(f'Scheduling upload job {upload_name} on the '
+                    f'{self.container_env} cluster')
+
+        try:
+            job = compute_mgr.schedule_job(copy_image, upload_cmd, upload_name,
+                                           resources_dict, upload_env,
+                                           user.get_uid(), user.get_gid(),
+                                           mounts_dict)
+        except ManagerException as e:
+            logger.error(f'Error from {self.container_env} while scheduling '
+                         f'upload job {upload_name}, detail: {str(e)}')
+            abort(e.status_code, message=str(e))
+
+        # For swift + docker: connect to pfcon's network so the upload
+        # container can reach the Swift service
+        if self.container_env == 'docker':
+            connect_to_pfcon_networks(job, app.config.get('PFCON_SELECTOR'))
+
+        logger.info(f'Successfully scheduled upload job {upload_name}')
 
 
 class Auth(Resource):
@@ -777,74 +1006,3 @@ def get_compute_mgr(container_env):
     elif container_env == 'cromwell':
         raise ValueError('cromwell not supported')
     return compute_mgr
-
-
-def schedule_main_job(params, job_id):
-    """
-    Schedule the main plugin container job from saved parameters.
-    Called by Job.get when the copy phase has finished successfully.
-    """
-    container_env = app.config.get('CONTAINER_ENV')
-    compute_volume_type = app.config.get('COMPUTE_VOLUME_TYPE')
-    user = ContainerUser.parse(app.config.get('CONTAINER_USER'))
-
-    env = list(params['env'])
-    if app.config.get('ENABLE_HOME_WORKAROUND'):
-        env.append('HOME=/tmp')
-
-    inputdir = '/share/incoming'
-    outputdir = '/share/outgoing'
-
-    cmd = list(params['entrypoint']) + localize_path_args(
-        list(params['args']), params['args_path_flags'], inputdir)
-    if params['type'] == 'ds':
-        cmd.append(inputdir)
-    cmd.append(outputdir)
-
-    storage_env = params['storage_env']
-
-    input_dir = 'key-' + job_id + '/incoming'
-    if storage_env == 'swift':
-        output_dir = 'key-' + job_id + '/outgoing'
-    else:
-        output_dir = params['output_dir'].strip('/')
-
-    resources_dict = {'number_of_workers': params['number_of_workers'],
-                      'cpu_limit': params['cpu_limit'],
-                      'memory_limit': params['memory_limit'],
-                      'gpu_limit': params['gpu_limit'],
-                      }
-    mounts_dict = {'inputdir_source': '',
-                   'inputdir_target': inputdir,
-                   'outputdir_source': '',
-                   'outputdir_target': outputdir
-                   }
-
-    if compute_volume_type in ('host', 'docker_local_volume'):
-        storebase = app.config.get('STOREBASE')
-        mounts_dict['inputdir_source'] = os.path.join(storebase, input_dir)
-        mounts_dict['outputdir_source'] = os.path.join(storebase, output_dir)
-    elif compute_volume_type == 'kubernetes_pvc':
-        mounts_dict['inputdir_source'] = input_dir
-        mounts_dict['outputdir_source'] = output_dir
-
-    logger.info(f'Scheduling main job {job_id} on the {container_env} cluster')
-
-    compute_mgr = get_compute_mgr(container_env)
-    job = compute_mgr.schedule_job(params['image'], cmd, job_id, resources_dict,
-                                   env, user.get_uid(), user.get_gid(),
-                                   mounts_dict)
-    job_info = compute_mgr.get_job_info(job)
-
-    logger.info(f'Successful main job {job_id} schedule response from '
-                f'{container_env}: {job_info}')
-
-    return {
-        'jid': job_id,
-        'image': job_info.image,
-        'cmd': job_info.cmd,
-        'status': job_info.status.value,
-        'message': job_info.message,
-        'timestamp': job_info.timestamp,
-        'logs': ''
-    }

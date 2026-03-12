@@ -14,6 +14,7 @@ from flask import url_for
 
 from pfcon.app import create_app
 from pfcon.compute.container_user import ContainerUser
+from pfcon.compute.abstractmgr import ManagerException
 from pfcon.resources import get_compute_mgr
 from pfcon.storage.swiftmanager import SwiftManager
 
@@ -348,3 +349,12 @@ class TestJobFile(ResourceTests):
         content = json.loads(response.data.decode())
         self.assertEqual(content['job_output_path'], self.swift_output_path)
         self.assertEqual(content['rel_file_paths'], ["out/test.txt"])
+
+        # cleanup upload container scheduled by JobFile.get for swift
+        with self.app.test_request_context():
+            compute_mgr = get_compute_mgr(self.container_env)
+            try:
+                upload_job = compute_mgr.get_job(job_id + '-upload')
+                compute_mgr.remove_job(upload_job)
+            except ManagerException:
+                pass

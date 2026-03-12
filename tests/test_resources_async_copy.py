@@ -445,6 +445,7 @@ class TestAsyncCopyStateMachine(TestCase):
             mock_mgr = MockDockerManager.return_value
             mock_mgr.get_job.side_effect = [
                 mock_copy_job,  # get_job(job_id + '-copy') → found
+                ManagerException('not found', status_code=404),  # get_job(job_id + '-upload') → missing
                 ManagerException('not found', status_code=404),  # get_job(job_id) → missing
             ]
 
@@ -464,18 +465,22 @@ class TestAsyncCopyStateMachine(TestCase):
         mock_copy_job = mock.MagicMock()
         mock_main_job = mock.MagicMock()
 
+        mock_upload_job = mock.MagicMock()
+
         with mock.patch('pfcon.resources.DockerManager') as MockDockerManager:
             mock_mgr = MockDockerManager.return_value
             mock_mgr.get_job.side_effect = [
-                mock_copy_job,  # get_job(job_id + '-copy')
-                mock_main_job,  # get_job(job_id)
+                mock_copy_job,   # get_job(job_id + '-copy')
+                mock_upload_job, # get_job(job_id + '-upload')
+                mock_main_job,   # get_job(job_id)
             ]
 
             response = self.client.delete(url, headers=self.headers)
 
         self.assertEqual(response.status_code, 204)
-        self.assertEqual(mock_mgr.remove_job.call_count, 2)
+        self.assertEqual(mock_mgr.remove_job.call_count, 3)
         mock_mgr.remove_job.assert_any_call(mock_copy_job)
+        mock_mgr.remove_job.assert_any_call(mock_upload_job)
         mock_mgr.remove_job.assert_any_call(mock_main_job)
 
     def test_delete_when_copy_container_missing_removes_main_job(self):
@@ -492,6 +497,7 @@ class TestAsyncCopyStateMachine(TestCase):
             mock_mgr = MockDockerManager.return_value
             mock_mgr.get_job.side_effect = [
                 ManagerException('not found', status_code=404),  # copy job missing
+                ManagerException('not found', status_code=404),  # upload job missing
                 mock_main_job,                                   # main job present
             ]
 
