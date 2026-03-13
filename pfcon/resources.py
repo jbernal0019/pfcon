@@ -674,8 +674,18 @@ class DeleteJob(BaseJob):
     """
 
     def get(self, job_id):
-        return self._get_job_status(job_id + '-delete',
-                                    jid_for_response=job_id)
+        response = self._get_job_status(job_id + '-delete',
+                                        jid_for_response=job_id)
+        if response['compute']['status'] == JobStatus.finishedSuccessfully.value:
+            key_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
+            try:
+                os.rmdir(key_dir)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning(f'Could not remove key directory {key_dir}; '
+                               f'it may not be empty')
+        return response
 
     def delete(self, job_id):
         self._remove_job(job_id + '-delete')
