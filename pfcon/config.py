@@ -99,7 +99,7 @@ class Config:
             # To configure Docker Engine/Podman, use the standard env variables for the Docker client.
             pass
 
-        self.PFCON_COPY_IMAGE = env('PFCON_COPY_IMAGE', 'ghcr.io/fnndsc/pfconcpjob')
+        self.PFCON_OP_IMAGE = env('PFCON_OP_IMAGE', 'ghcr.io/fnndsc/pfconopjob')
 
         self.env = env
 

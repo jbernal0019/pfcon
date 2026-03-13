@@ -69,13 +69,13 @@ jobs:
           type=pep440,pattern={{version}}
           type=pep440,pattern={{major}}.{{minor}}
           type=raw,value=latest,enable={{is_default_branch}}
-    - name: Docker meta (copyjob)
-      id: meta-copyjob
+    - name: Docker meta (opjob)
+      id: meta-opjob
       uses: docker/metadata-action@v5
       with:
         images: |
-          docker.io/fnndsc/pfconcpjob
-          ghcr.io/fnndsc/pfconcpjob
+          docker.io/fnndsc/pfconopjob
+          ghcr.io/fnndsc/pfconopjob
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -127,14 +127,14 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
-    - name: Build and push (copyjob)
+    - name: Build and push (opjob)
       uses: docker/build-push-action@v6
       with:
         push: ${{ steps.login-dockerhub.outcome == 'success' && steps.login-ghcr.outcome == 'success' }}
         context: .
-        file: ./copyjob.Dockerfile
+        file: ./opjob.Dockerfile
         platforms: linux/amd64,linux/arm64,linux/ppc64le
-        tags: ${{ steps.meta-copyjob.outputs.tags }}
-        labels: ${{ steps.meta-copyjob.outputs.labels }}
+        tags: ${{ steps.meta-opjob.outputs.tags }}
+        labels: ${{ steps.meta-opjob.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max

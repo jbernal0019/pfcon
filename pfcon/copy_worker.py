@@ -5,11 +5,13 @@ asynchronous file operations for fslink and swift storage modes.
 Subcommands:
     copy   — fetch input files (default when no subcommand given)
     upload — upload output files to Swift
+    delete — delete job data from storebase
 
 Usage:
     python -m pfcon.copy_worker /share/outgoing               (copy, default)
     python -m pfcon.copy_worker copy /share/outgoing           (copy, explicit)
     python -m pfcon.copy_worker upload /share/outgoing         (upload)
+    python -m pfcon.copy_worker delete /share/outgoing         (delete)
 
 Inside the container:
     /share/incoming  -> shared filesystem root (read-only, fslink copy only)
@@ -29,6 +31,7 @@ import logging
 
 from pfcon.storage.fslink_storage import FSLinkStorage
 from pfcon.storage.swift_storage import SwiftStorage
+from pfcon.delete_worker import do_delete
 
 
 logging.basicConfig(level=logging.INFO,
@@ -115,7 +118,7 @@ def main():
         sys.exit(1)
 
     # If first arg is a subcommand, use it; otherwise default to 'copy'
-    if args[0] in ('copy', 'upload'):
+    if args[0] in ('copy', 'upload', 'delete'):
         subcommand = args[0]
         if len(args) < 2:
             print(f'Usage: {sys.argv[0]} {subcommand} <key_dir>',
@@ -130,6 +133,8 @@ def main():
         do_copy(key_dir)
     elif subcommand == 'upload':
         do_upload(key_dir)
+    elif subcommand == 'delete':
+        do_delete(key_dir)
 
 
 if __name__ == '__main__':

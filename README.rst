@@ -270,6 +270,7 @@ Environment Variable           Description
 ``PFCON_USER``                  ``pfcon`` auth user
 ``PFCON_PASSWORD``              ``pfcon`` auth user's password
 ``PFCON_INNETWORK``             (bool) whether the server was deployed "in-network" mode
+``PFCON_OP_IMAGE``              container image for the data operation (copy, upload, delete) container in "in-network" mode
 ``STORAGE_ENV``                 one of: "swift", "filesystem", "fslink", "zipfile"
 ``CONTAINER_ENV``               one of: "swarm", "kubernetes", "cromwell", "docker"
 ``COMPUTE_VOLUME_TYPE``         | one of: "host", "docker_local_volume", "kubernetes_pvc"

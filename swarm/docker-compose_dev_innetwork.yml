@@ -9,11 +9,11 @@
 #
 
 services:
-  copyjob:
-    image: ghcr.io/fnndsc/pfconcpjob
+  opjob:
+    image: ghcr.io/fnndsc/pfconopjob
     build:
       context: ..
-      dockerfile: copyjob.Dockerfile
+      dockerfile: opjob.Dockerfile
 
   pfcon:
     image: localhost:5000/fnndsc/pfcon:dev
