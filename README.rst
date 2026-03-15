@@ -43,10 +43,8 @@ After submitting a plugin job ``pfcon``'s API can then be used to query and cont
 
 - *state*: Is plugin job <job_id> still running?
 
-Check out the `Client Request/Response Flow`_ document to see the full workflow involved in running a plugin and 
+Check out the [Client Request/Response Flow](req_response_flow.md) document to see the full workflow involved in running a plugin and 
 examples of http calls accepted by ``pfcon`` server.
-
-.. _`Client Request/Response Flow`: req_response_flow.md
 
 Additionally a Python3 client for this server's web API is provided here: https://github.com/FNNDSC/python-pfconclient
 
