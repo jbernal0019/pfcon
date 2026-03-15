@@ -107,6 +107,10 @@ class TestCopyJobList(NewResourcesTestBase):
 
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
+            # First get_job call: idempotency check finds no existing job
+            mgr.get_job.side_effect = [
+                ManagerException('not found', status_code=404),
+            ]
             mgr.schedule_job.return_value = 'mock_copy_job'
             mgr.get_job_info.return_value = copy_info
 
@@ -128,6 +132,128 @@ class TestCopyJobList(NewResourcesTestBase):
         # Schedule was called with '-copy' suffix
         scheduled_name = mgr.schedule_job.call_args[0][2]
         self.assertEqual(scheduled_name, job_id + '-copy')
+
+    def test_post_idempotent_existing_copy(self):
+        """If copy container already exists and is running, return
+        its status without scheduling a new one."""
+        job_id = 'copy-idemp-1'
+        data = {
+            'jid': job_id,
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        with self.app.test_request_context():
+            url = url_for('api.copyjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            # Existing copy container found and running
+            mgr.get_job.return_value = 'existing_copy'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started, image='pfconopjob')
+            mgr.get_job_logs.return_value = ''
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['compute']['status'], 'started')
+        # schedule_job NOT called (idempotent)
+        mgr.schedule_job.assert_not_called()
+
+    def test_post_reschedules_failed_copy(self):
+        """If previous copy failed, remove it and re-schedule."""
+        job_id = 'copy-resched-1'
+        key_dir = os.path.join(self.tmpdir, 'key-' + job_id)
+        os.makedirs(os.path.join(key_dir, 'incoming'), exist_ok=True)
+
+        data = {
+            'jid': job_id,
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        failed_info = _make_job_info(JobStatus.finishedWithError)
+        new_info = _make_job_info(JobStatus.notStarted)
+
+        with self.app.test_request_context():
+            url = url_for('api.copyjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mock_failed = mock.MagicMock()
+            mgr.get_job.side_effect = [mock_failed]
+            mgr.get_job_info.side_effect = [failed_info, new_info]
+            mgr.schedule_job.return_value = 'new_copy_job'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        # Old copy was removed
+        mgr.remove_job.assert_called_once_with(mock_failed)
+        # New copy was scheduled
+        mgr.schedule_job.assert_called_once()
+
+    def test_post_reschedules_undefined_copy(self):
+        """If previous copy has undefined status, remove it and re-schedule."""
+        job_id = 'copy-undef-1'
+        key_dir = os.path.join(self.tmpdir, 'key-' + job_id)
+        os.makedirs(os.path.join(key_dir, 'incoming'), exist_ok=True)
+
+        data = {
+            'jid': job_id,
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        undef_info = _make_job_info(JobStatus.undefined)
+        new_info = _make_job_info(JobStatus.notStarted)
+
+        with self.app.test_request_context():
+            url = url_for('api.copyjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mock_undef = mock.MagicMock()
+            mgr.get_job.side_effect = [mock_undef]
+            mgr.get_job_info.side_effect = [undef_info, new_info]
+            mgr.schedule_job.return_value = 'new_copy_job'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        mgr.remove_job.assert_called_once_with(mock_undef)
+        mgr.schedule_job.assert_called_once()
+
+    def test_post_idempotent_finished_copy(self):
+        """If copy container finished successfully, return its status."""
+        job_id = 'copy-done-1'
+        data = {
+            'jid': job_id,
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        with self.app.test_request_context():
+            url = url_for('api.copyjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.get_job.return_value = 'existing_copy'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.finishedSuccessfully, image='pfconopjob')
+            mgr.get_job_logs.return_value = 'copy done'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['compute']['status'],
+                         'finishedSuccessfully')
+        mgr.schedule_job.assert_not_called()
 
     def test_post_noop_for_zipfile_storage(self):
         """Copy is a no-op for non-fslink/swift storage."""
@@ -249,6 +375,10 @@ class TestPluginJobList(NewResourcesTestBase):
 
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
+            # First get_job call: idempotency check finds no existing job
+            mgr.get_job.side_effect = [
+                ManagerException('not found', status_code=404),
+            ]
             mgr.schedule_job.return_value = 'mock_plugin_job'
             mgr.get_job_info.return_value = plugin_info
 
@@ -262,6 +392,139 @@ class TestPluginJobList(NewResourcesTestBase):
         # Main job scheduled directly (no '-copy' suffix)
         scheduled_name = mgr.schedule_job.call_args[0][2]
         self.assertEqual(scheduled_name, job_id)
+
+
+    def test_post_idempotent_existing_plugin(self):
+        """If plugin container already exists and is running, return
+        its status without scheduling a new one."""
+        job_id = 'plugin-idemp-1'
+
+        incoming = os.path.join(self.tmpdir, 'key-' + job_id, 'incoming')
+        os.makedirs(incoming, exist_ok=True)
+
+        data = {
+            'jid': job_id,
+            'entrypoint': ['python3', '/usr/local/bin/simplefsapp'],
+            'args': ['--dir', '/share/incoming'],
+            'auid': 'cube',
+            'number_of_workers': '1',
+            'cpu_limit': '1000',
+            'memory_limit': '200',
+            'gpu_limit': '0',
+            'image': 'fnndsc/pl-simplefsapp',
+            'type': 'fs',
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        with self.app.test_request_context():
+            url = url_for('api.pluginjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.get_job.return_value = 'existing_plugin'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started, image='fnndsc/pl-simplefsapp')
+            mgr.get_job_logs.return_value = ''
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['compute']['status'], 'started')
+        mgr.schedule_job.assert_not_called()
+
+    def test_post_reschedules_failed_plugin(self):
+        """If previous plugin failed, remove it and re-schedule."""
+        job_id = 'plugin-resched-1'
+
+        incoming = os.path.join(self.tmpdir, 'key-' + job_id, 'incoming')
+        os.makedirs(incoming, exist_ok=True)
+        with open(os.path.join(incoming, 'test.txt'), 'w') as f:
+            f.write('test')
+
+        data = {
+            'jid': job_id,
+            'entrypoint': ['python3', '/usr/local/bin/simplefsapp'],
+            'args': ['--dir', '/share/incoming'],
+            'auid': 'cube',
+            'number_of_workers': '1',
+            'cpu_limit': '1000',
+            'memory_limit': '200',
+            'gpu_limit': '0',
+            'image': 'fnndsc/pl-simplefsapp',
+            'type': 'fs',
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        failed_info = _make_job_info(JobStatus.finishedWithError,
+                                     image='fnndsc/pl-simplefsapp')
+        new_info = _make_job_info(JobStatus.notStarted,
+                                  image='fnndsc/pl-simplefsapp')
+
+        with self.app.test_request_context():
+            url = url_for('api.pluginjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mock_failed = mock.MagicMock()
+            mgr.get_job.side_effect = [mock_failed]
+            mgr.get_job_info.side_effect = [failed_info, new_info]
+            mgr.schedule_job.return_value = 'new_plugin_job'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        mgr.remove_job.assert_called_once_with(mock_failed)
+        mgr.schedule_job.assert_called_once()
+
+    def test_post_reschedules_undefined_plugin(self):
+        """If previous plugin has undefined status, remove and re-schedule."""
+        job_id = 'plugin-undef-1'
+
+        incoming = os.path.join(self.tmpdir, 'key-' + job_id, 'incoming')
+        os.makedirs(incoming, exist_ok=True)
+        with open(os.path.join(incoming, 'test.txt'), 'w') as f:
+            f.write('test')
+
+        data = {
+            'jid': job_id,
+            'entrypoint': ['python3', '/usr/local/bin/simplefsapp'],
+            'args': ['--dir', '/share/incoming'],
+            'auid': 'cube',
+            'number_of_workers': '1',
+            'cpu_limit': '1000',
+            'memory_limit': '200',
+            'gpu_limit': '0',
+            'image': 'fnndsc/pl-simplefsapp',
+            'type': 'fs',
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        undef_info = _make_job_info(JobStatus.undefined,
+                                    image='fnndsc/pl-simplefsapp')
+        new_info = _make_job_info(JobStatus.notStarted,
+                                  image='fnndsc/pl-simplefsapp')
+
+        with self.app.test_request_context():
+            url = url_for('api.pluginjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mock_undef = mock.MagicMock()
+            mgr.get_job.side_effect = [mock_undef]
+            mgr.get_job_info.side_effect = [undef_info, new_info]
+            mgr.schedule_job.return_value = 'new_plugin_job'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        mgr.remove_job.assert_called_once_with(mock_undef)
+        mgr.schedule_job.assert_called_once()
 
 
 class TestPluginJob(NewResourcesTestBase):
@@ -574,6 +837,10 @@ class TestDeleteJobList(NewResourcesTestBase):
 
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
+            # First get_job call: idempotency check finds no existing job
+            mgr.get_job.side_effect = [
+                ManagerException('not found', status_code=404),
+            ]
             mgr.schedule_job.return_value = 'mock_del_job'
             mgr.get_job_info.return_value = del_info
 
@@ -607,6 +874,115 @@ class TestDeleteJobList(NewResourcesTestBase):
                          'finishedSuccessfully')
         self.assertEqual(response.json['compute']['message'],
                          'deleteSkipped')
+
+
+    def test_post_idempotent_existing_delete(self):
+        """If delete container already exists and is running, return
+        its status without scheduling a new one."""
+        job_id = 'del-idemp-1'
+        key_dir = os.path.join(self.tmpdir, 'key-' + job_id)
+        os.makedirs(os.path.join(key_dir, 'incoming'), exist_ok=True)
+
+        with self.app.test_request_context():
+            url = url_for('api.deletejoblist')
+
+        data = {'jid': job_id}
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.get_job.return_value = 'existing_delete'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started, image='pfconopjob')
+            mgr.get_job_logs.return_value = ''
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['compute']['status'], 'started')
+        mgr.schedule_job.assert_not_called()
+
+    def test_post_reschedules_failed_delete(self):
+        """If previous delete failed, remove it and re-schedule."""
+        job_id = 'del-resched-1'
+        key_dir = os.path.join(self.tmpdir, 'key-' + job_id)
+        os.makedirs(os.path.join(key_dir, 'incoming'), exist_ok=True)
+
+        with self.app.test_request_context():
+            url = url_for('api.deletejoblist')
+
+        data = {'jid': job_id}
+
+        failed_info = _make_job_info(JobStatus.finishedWithError)
+        new_info = _make_job_info(JobStatus.notStarted)
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mock_failed = mock.MagicMock()
+            mgr.get_job.side_effect = [mock_failed]
+            mgr.get_job_info.side_effect = [failed_info, new_info]
+            mgr.schedule_job.return_value = 'new_del_job'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        mgr.remove_job.assert_called_once_with(mock_failed)
+        mgr.schedule_job.assert_called_once()
+
+    def test_post_reschedules_undefined_delete(self):
+        """If previous delete has undefined status, remove and re-schedule."""
+        job_id = 'del-undef-1'
+        key_dir = os.path.join(self.tmpdir, 'key-' + job_id)
+        os.makedirs(os.path.join(key_dir, 'incoming'), exist_ok=True)
+
+        with self.app.test_request_context():
+            url = url_for('api.deletejoblist')
+
+        data = {'jid': job_id}
+
+        undef_info = _make_job_info(JobStatus.undefined)
+        new_info = _make_job_info(JobStatus.notStarted)
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mock_undef = mock.MagicMock()
+            mgr.get_job.side_effect = [mock_undef]
+            mgr.get_job_info.side_effect = [undef_info, new_info]
+            mgr.schedule_job.return_value = 'new_del_job'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        mgr.remove_job.assert_called_once_with(mock_undef)
+        mgr.schedule_job.assert_called_once()
+
+    def test_post_idempotent_finished_delete(self):
+        """If delete container finished successfully, return its status."""
+        job_id = 'del-done-1'
+        key_dir = os.path.join(self.tmpdir, 'key-' + job_id)
+        os.makedirs(os.path.join(key_dir, 'incoming'), exist_ok=True)
+
+        with self.app.test_request_context():
+            url = url_for('api.deletejoblist')
+
+        data = {'jid': job_id}
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.get_job.return_value = 'existing_delete'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.finishedSuccessfully, image='pfconopjob')
+            mgr.get_job_logs.return_value = 'deleted'
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['compute']['status'],
+                         'finishedSuccessfully')
+        mgr.schedule_job.assert_not_called()
 
 
 class TestDeleteJob(NewResourcesTestBase):

@@ -11,7 +11,7 @@ import logging
 from flask import current_app as app
 from flask_restful import abort, Resource
 
-from .compute.abstractmgr import ManagerException
+from .compute.abstractmgr import ManagerException, JobStatus
 from .compute.container_user import ContainerUser
 from .compute.dockermgr import DockerManager
 from .compute.kubernetesmgr import KubernetesManager
@@ -50,6 +50,7 @@ class BaseJobList(Resource):
         self.compute_volume_type = app.config.get('COMPUTE_VOLUME_TYPE')
         self.user = ContainerUser.parse(app.config.get('CONTAINER_USER'))
 
+        self.job_logs_tail = app.config.get('JOB_LOGS_TAIL')
         self.str_app_container_inputdir = '/share/incoming'
         self.str_app_container_outputdir = '/share/outgoing'
 
@@ -158,6 +159,47 @@ class BaseJobList(Resource):
             abort(500, message='PFCON_OP_IMAGE must be configured for '
                                'async operation jobs')
         return op_image
+
+
+    def _check_existing_job(self, job_name, jid_for_response=None):
+        """
+        Idempotency check: if a container with job_name already exists,
+        return (True, response_dict) for running/succeeded jobs, or
+        remove it and return (False, None) for failed jobs.
+        Returns (False, None) if the job doesn't exist.
+        """
+        jid = jid_for_response or job_name
+        compute_mgr = get_compute_mgr(self.container_env)
+
+        try:
+            job = compute_mgr.get_job(job_name)
+            job_info = compute_mgr.get_job_info(job)
+
+            if job_info.status in (JobStatus.finishedWithError,
+                                   JobStatus.undefined):
+                compute_mgr.remove_job(job)
+                logger.info(f'Removed failed job {job_name}, '
+                            f'will re-schedule')
+                return False, None
+
+            logger.info(f'Job {job_name} already exists '
+                        f'(status: {job_info.status.value})')
+            job_logs = compute_mgr.get_job_logs(job, self.job_logs_tail)
+            if isinstance(job_logs, bytes):
+                job_logs = job_logs.decode(encoding='utf-8',
+                                           errors='replace')
+
+            return True, {'compute': {
+                'jid': jid,
+                'image': job_info.image,
+                'cmd': job_info.cmd,
+                'status': job_info.status.value,
+                'message': job_info.message,
+                'timestamp': job_info.timestamp,
+                'logs': job_logs,
+            }}
+        except ManagerException:
+            return False, None
 
 
 class BaseJob(Resource):

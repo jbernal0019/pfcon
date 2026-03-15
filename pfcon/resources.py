@@ -14,9 +14,9 @@ from .storage.zip_file_storage import ZipFileStorage
 from .storage.swift_storage import SwiftStorage
 from .storage.filesystem_storage import FileSystemStorage
 from .storage.fslink_storage import FSLinkStorage
-from .compute.abstractmgr import ManagerException, JobStatus
+from .compute.abstractmgr import JobStatus
 from .compute._helpers import connect_to_pfcon_networks
-from .base_resources import BaseJobList, BaseJob, get_compute_mgr
+from .base_resources import BaseJobList, BaseJob
 
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,8 @@ class CopyJobList(BaseJobList):
     Resource for scheduling and listing copy jobs.
     POST schedules an async copy container for fslink/swift storage.
     For other storage modes the copy is a no-op.
+    Idempotent: if the copy container already exists and hasn't failed,
+    the POST returns the existing container's status.
     """
 
     def get(self):
@@ -184,6 +186,13 @@ class CopyJobList(BaseJobList):
                 'logs': '',
             }}, 201
 
+        copy_name = job_id + '-copy'
+
+        exists, response = self._check_existing_job(copy_name,
+                                                     jid_for_response=job_id)
+        if exists:
+            return response, 201
+
         key_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
         incoming_dir = os.path.join(key_dir, 'incoming')
         os.makedirs(incoming_dir, exist_ok=True)
@@ -202,7 +211,6 @@ class CopyJobList(BaseJobList):
         op_image = self._get_op_image()
         copy_cmd = ['python', '-m', 'pfcon.copy_worker',
                     self.str_app_container_outputdir]
-        copy_name = job_id + '-copy'
 
         resources_dict = {
             'number_of_workers': 1,
@@ -260,6 +268,8 @@ class PluginJobList(BaseJobList):
     """
     Resource for scheduling plugin container jobs.
     The client is responsible for scheduling copy/upload/delete separately.
+    Idempotent: if the plugin container already exists and hasn't failed,
+    the POST returns the existing container's status.
     """
 
     def get(self):
@@ -271,6 +281,10 @@ class PluginJobList(BaseJobList):
 
         job_id = args.jid.lstrip('/')
         logger.info(f'Received plugin job {job_id}')
+
+        exists, response = self._check_existing_job(job_id)
+        if exists:
+            return {'data': {}, 'compute': response['compute']}, 201
 
         # For fslink/swift in-network: copy already done by client via
         # CopyJobList. Schedule the plugin container directly.
@@ -522,38 +536,11 @@ class UploadJobList(BaseJobList):
             }}, 201
 
         upload_name = job_id + '-upload'
-        compute_mgr = get_compute_mgr(self.container_env)
 
-        # Idempotency: check if upload container already exists
-        try:
-            upload_job = compute_mgr.get_job(upload_name)
-            upload_info = compute_mgr.get_job_info(upload_job)
-
-            if upload_info.status == JobStatus.finishedWithError:
-                # Previous upload failed, remove and re-schedule
-                compute_mgr.remove_job(upload_job)
-                logger.info(f'Removed failed upload job {upload_name}, '
-                            f'will re-schedule')
-            else:
-                # Already running or finished successfully
-                logger.info(f'Upload job {upload_name} already exists '
-                            f'(status: {upload_info.status.value})')
-                job_logs = compute_mgr.get_job_logs(upload_job,
-                                                    self.job_logs_tail)
-                if isinstance(job_logs, bytes):
-                    job_logs = job_logs.decode(encoding='utf-8',
-                                              errors='replace')
-                return {'compute': {
-                    'jid': job_id,
-                    'image': upload_info.image,
-                    'cmd': upload_info.cmd,
-                    'status': upload_info.status.value,
-                    'message': upload_info.message,
-                    'timestamp': upload_info.timestamp,
-                    'logs': job_logs,
-                }}, 201
-        except ManagerException:
-            pass  # Doesn't exist yet, proceed to schedule
+        exists, response = self._check_existing_job(upload_name,
+                                                     jid_for_response=job_id)
+        if exists:
+            return response, 201
 
         # Write upload parameters to disk
         key_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
@@ -589,10 +576,6 @@ class UploadJobList(BaseJobList):
 
         return {'compute': d_compute}, 201
 
-    @property
-    def job_logs_tail(self):
-        return app.config.get('JOB_LOGS_TAIL')
-
 
 class UploadJob(BaseJob):
     """
@@ -616,6 +599,8 @@ class DeleteJobList(BaseJobList):
     """
     Resource for scheduling async data deletion jobs.
     POST schedules a container that removes the job's storebase data.
+    Idempotent: if the delete container already exists and hasn't failed,
+    the POST returns the existing container's status.
     """
 
     def get(self):
@@ -641,6 +626,13 @@ class DeleteJobList(BaseJobList):
                 'logs': '',
             }}, 201
 
+        delete_name = job_id + '-delete'
+
+        exists, response = self._check_existing_job(delete_name,
+                                                     jid_for_response=job_id)
+        if exists:
+            return response, 201
+
         # Write delete parameters for the worker
         params = {'jid': job_id}
         params_file = os.path.join(key_dir, 'delete_params.json')
@@ -650,7 +642,6 @@ class DeleteJobList(BaseJobList):
         op_image = self._get_op_image()
         delete_cmd = ['python', '-m', 'pfcon.delete_worker',
                       self.str_app_container_outputdir]
-        delete_name = job_id + '-delete'
 
         resources_dict = {
             'number_of_workers': 1,
