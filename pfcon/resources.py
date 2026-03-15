@@ -14,9 +14,9 @@ from .storage.zip_file_storage import ZipFileStorage
 from .storage.swift_storage import SwiftStorage
 from .storage.filesystem_storage import FileSystemStorage
 from .storage.fslink_storage import FSLinkStorage
-from .compute.abstractmgr import JobStatus
+from .compute.abstractmgr import JobStatus, ManagerException
 from .compute._helpers import connect_to_pfcon_networks
-from .base_resources import BaseJobList, BaseJob
+from .base_resources import BaseJobList, BaseJob, get_compute_mgr
 
 
 logger = logging.getLogger(__name__)
@@ -289,6 +289,21 @@ class PluginJobList(BaseJobList):
         # For fslink/swift in-network: copy already done by client via
         # CopyJobList. Schedule the plugin container directly.
         if self.pfcon_innetwork and self.storage_env in ('fslink', 'swift'):
+            copy_name = job_id + '-copy'
+            compute_mgr = get_compute_mgr(self.container_env)
+            try:
+                copy_job = compute_mgr.get_job(copy_name)
+                copy_info = compute_mgr.get_job_info(copy_job)
+                if copy_info.status != JobStatus.finishedSuccessfully:
+                    abort(409, message=f'Copy job has not completed '
+                                       f'successfully (status: '
+                                       f'{copy_info.status.value}). Run the '
+                                       f'copy job first.')
+            except ManagerException:
+                abort(409, message='No copy job found. A copy job must '
+                                   'complete successfully before scheduling '
+                                   'a plugin job.')
+
             input_dir = 'key-' + job_id + '/incoming'
 
             if self.storage_env == 'swift':
@@ -535,6 +550,20 @@ class UploadJobList(BaseJobList):
                 'logs': '',
             }}, 201
 
+        compute_mgr = get_compute_mgr(self.container_env)
+        try:
+            plugin_job = compute_mgr.get_job(job_id)
+            plugin_info = compute_mgr.get_job_info(plugin_job)
+            if plugin_info.status != JobStatus.finishedSuccessfully:
+                abort(409, message=f'Plugin job has not completed '
+                                   f'successfully (status: '
+                                   f'{plugin_info.status.value}). The plugin '
+                                   f'job must finish before uploading.')
+        except ManagerException:
+            abort(409, message='No plugin job found. A plugin job must '
+                               'complete successfully before scheduling '
+                               'an upload job.')
+
         upload_name = job_id + '-upload'
 
         exists, response = self._check_existing_job(upload_name,
@@ -625,6 +654,25 @@ class DeleteJobList(BaseJobList):
                 'timestamp': '',
                 'logs': '',
             }}, 201
+
+        # Ensure no sibling jobs are still running
+        non_terminal = (JobStatus.started, JobStatus.notStarted)
+        compute_mgr = get_compute_mgr(self.container_env)
+
+        for suffix, label in (('-copy', 'copy'), ('', 'plugin'),
+                              ('-upload', 'upload')):
+            job_name = job_id + suffix
+            try:
+                sibling = compute_mgr.get_job(job_name)
+                sibling_info = compute_mgr.get_job_info(sibling)
+                if sibling_info.status in non_terminal:
+                    abort(409,
+                          message=f'The {label} job is still active '
+                                  f'(status: {sibling_info.status.value}). '
+                                  f'All jobs must finish before scheduling '
+                                  f'a delete job.')
+            except ManagerException:
+                pass  # job doesn't exist, safe to proceed
 
         delete_name = job_id + '-delete'
 

@@ -375,12 +375,15 @@ class TestPluginJobList(NewResourcesTestBase):
 
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
-            # First get_job call: idempotency check finds no existing job
             mgr.get_job.side_effect = [
-                ManagerException('not found', status_code=404),
+                ManagerException('not found', status_code=404),  # idempotency
+                'mock_copy_job',  # copy guard
             ]
             mgr.schedule_job.return_value = 'mock_plugin_job'
-            mgr.get_job_info.return_value = plugin_info
+            mgr.get_job_info.side_effect = [
+                _make_job_info(JobStatus.finishedSuccessfully),  # copy guard
+                plugin_info,  # schedule response
+            ]
 
             response = self.client.post(url, data=data,
                                         headers=self.headers)
@@ -469,8 +472,12 @@ class TestPluginJobList(NewResourcesTestBase):
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
             mock_failed = mock.MagicMock()
-            mgr.get_job.side_effect = [mock_failed]
-            mgr.get_job_info.side_effect = [failed_info, new_info]
+            mgr.get_job.side_effect = [mock_failed, 'mock_copy_job']
+            mgr.get_job_info.side_effect = [
+                failed_info,  # idempotency → remove
+                _make_job_info(JobStatus.finishedSuccessfully),  # copy guard
+                new_info,  # schedule response
+            ]
             mgr.schedule_job.return_value = 'new_plugin_job'
 
             response = self.client.post(url, data=data,
@@ -515,8 +522,12 @@ class TestPluginJobList(NewResourcesTestBase):
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
             mock_undef = mock.MagicMock()
-            mgr.get_job.side_effect = [mock_undef]
-            mgr.get_job_info.side_effect = [undef_info, new_info]
+            mgr.get_job.side_effect = [mock_undef, 'mock_copy_job']
+            mgr.get_job_info.side_effect = [
+                undef_info,  # idempotency → remove
+                _make_job_info(JobStatus.finishedSuccessfully),  # copy guard
+                new_info,  # schedule response
+            ]
             mgr.schedule_job.return_value = 'new_plugin_job'
 
             response = self.client.post(url, data=data,
@@ -672,12 +683,15 @@ class TestUploadJobList(NewResourcesTestBase):
 
             with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
                 mgr = MockMgr.return_value
-                # First call: get_job raises (no existing upload)
                 mgr.get_job.side_effect = [
-                    ManagerException('not found', status_code=404),
+                    'mock_plugin_job',  # plugin guard
+                    ManagerException('not found', status_code=404),  # idempotency
                 ]
                 mgr.schedule_job.return_value = 'mock_upload_job'
-                mgr.get_job_info.return_value = upload_info
+                mgr.get_job_info.side_effect = [
+                    _make_job_info(JobStatus.finishedSuccessfully),  # plugin guard
+                    upload_info,  # schedule response
+                ]
 
                 with mock.patch(
                         'pfcon.resources.connect_to_pfcon_networks'):
@@ -716,10 +730,14 @@ class TestUploadJobList(NewResourcesTestBase):
 
             with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
                 mgr = MockMgr.return_value
-                # Existing upload container found and running
-                mgr.get_job.return_value = 'existing_upload'
-                mgr.get_job_info.return_value = _make_job_info(
-                    JobStatus.started, image='pfconopjob')
+                mgr.get_job.side_effect = [
+                    'mock_plugin_job',  # plugin guard
+                    'existing_upload',  # idempotency: found running
+                ]
+                mgr.get_job_info.side_effect = [
+                    _make_job_info(JobStatus.finishedSuccessfully),  # plugin guard
+                    _make_job_info(JobStatus.started, image='pfconopjob'),  # idempotency
+                ]
                 mgr.get_job_logs.return_value = ''
 
                 response = self.client.post(url, data=data,
@@ -758,11 +776,16 @@ class TestUploadJobList(NewResourcesTestBase):
 
             with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
                 mgr = MockMgr.return_value
-                # First get_job: existing failed upload
-                # After remove, schedule_job succeeds
                 mock_failed = mock.MagicMock()
-                mgr.get_job.side_effect = [mock_failed]
-                mgr.get_job_info.side_effect = [failed_info, new_info]
+                mgr.get_job.side_effect = [
+                    'mock_plugin_job',  # plugin guard
+                    mock_failed,  # idempotency: found failed
+                ]
+                mgr.get_job_info.side_effect = [
+                    _make_job_info(JobStatus.finishedSuccessfully),  # plugin guard
+                    failed_info,  # idempotency → remove
+                    new_info,  # schedule response
+                ]
                 mgr.schedule_job.return_value = 'new_upload_job'
 
                 with mock.patch(
@@ -835,11 +858,14 @@ class TestDeleteJobList(NewResourcesTestBase):
         data = {'jid': job_id}
         del_info = _make_job_info(JobStatus.notStarted)
 
+        not_found = ManagerException('not found', status_code=404)
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
-            # First get_job call: idempotency check finds no existing job
             mgr.get_job.side_effect = [
-                ManagerException('not found', status_code=404),
+                not_found,  # copy guard
+                not_found,  # plugin guard
+                not_found,  # upload guard
+                not_found,  # idempotency
             ]
             mgr.schedule_job.return_value = 'mock_del_job'
             mgr.get_job_info.return_value = del_info
@@ -888,9 +914,15 @@ class TestDeleteJobList(NewResourcesTestBase):
 
         data = {'jid': job_id}
 
+        not_found = ManagerException('not found', status_code=404)
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
-            mgr.get_job.return_value = 'existing_delete'
+            mgr.get_job.side_effect = [
+                not_found,           # copy guard
+                not_found,           # plugin guard
+                not_found,           # upload guard
+                'existing_delete',   # idempotency: found running
+            ]
             mgr.get_job_info.return_value = _make_job_info(
                 JobStatus.started, image='pfconopjob')
             mgr.get_job_logs.return_value = ''
@@ -916,10 +948,16 @@ class TestDeleteJobList(NewResourcesTestBase):
         failed_info = _make_job_info(JobStatus.finishedWithError)
         new_info = _make_job_info(JobStatus.notStarted)
 
+        not_found = ManagerException('not found', status_code=404)
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
             mock_failed = mock.MagicMock()
-            mgr.get_job.side_effect = [mock_failed]
+            mgr.get_job.side_effect = [
+                not_found,     # copy guard
+                not_found,     # plugin guard
+                not_found,     # upload guard
+                mock_failed,   # idempotency: found failed
+            ]
             mgr.get_job_info.side_effect = [failed_info, new_info]
             mgr.schedule_job.return_value = 'new_del_job'
 
@@ -944,10 +982,16 @@ class TestDeleteJobList(NewResourcesTestBase):
         undef_info = _make_job_info(JobStatus.undefined)
         new_info = _make_job_info(JobStatus.notStarted)
 
+        not_found = ManagerException('not found', status_code=404)
         with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
             mgr = MockMgr.return_value
             mock_undef = mock.MagicMock()
-            mgr.get_job.side_effect = [mock_undef]
+            mgr.get_job.side_effect = [
+                not_found,    # copy guard
+                not_found,    # plugin guard
+                not_found,    # upload guard
+                mock_undef,   # idempotency: found undefined
+            ]
             mgr.get_job_info.side_effect = [undef_info, new_info]
             mgr.schedule_job.return_value = 'new_del_job'
 
@@ -1022,3 +1066,411 @@ class TestDeleteJob(NewResourcesTestBase):
         self.assertEqual(response.status_code, 204)
         mgr.get_job.assert_called_once_with(job_id + '-delete')
         mgr.remove_job.assert_called_once_with(mock_job)
+
+
+# ---------------------------------------------------------------------------
+# Job safeguard tests
+# ---------------------------------------------------------------------------
+
+class TestPluginJobCopyGuard(NewResourcesTestBase):
+    """Safeguard: plugin job requires a successfully completed copy job
+    in fslink/swift in-network mode."""
+
+    _plugin_data = {
+        'entrypoint': ['python3', '/usr/local/bin/simplefsapp'],
+        'args': ['--dir', '/share/incoming'],
+        'auid': 'cube',
+        'number_of_workers': '1',
+        'cpu_limit': '1000',
+        'memory_limit': '200',
+        'gpu_limit': '0',
+        'image': 'fnndsc/pl-simplefsapp',
+        'type': 'fs',
+        'input_dirs': ['home/foo/feed/input'],
+        'output_dir': 'home/foo/feed/output',
+    }
+
+    def _post_plugin(self, job_id, mgr_setup):
+        data = dict(self._plugin_data, jid=job_id)
+
+        with self.app.test_request_context():
+            url = url_for('api.pluginjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr_setup(mgr)
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+        return response
+
+    def test_rejected_when_no_copy_job(self):
+        """409 when no copy job exists."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,  # idempotency
+                not_found,  # copy guard: not found
+            ]
+
+        response = self._post_plugin('guard-nocopy', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('No copy job found', response.json['message'])
+
+    def test_rejected_when_copy_started(self):
+        """409 when copy job is still running."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,        # idempotency
+                'mock_copy_job',  # copy guard
+            ]
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started)
+
+        response = self._post_plugin('guard-copyrun', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('started', response.json['message'])
+        self.assertIn('copy job', response.json['message'].lower())
+
+    def test_rejected_when_copy_not_started(self):
+        """409 when copy job hasn't started yet."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,        # idempotency
+                'mock_copy_job',  # copy guard
+            ]
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.notStarted)
+
+        response = self._post_plugin('guard-copyns', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('notStarted', response.json['message'])
+
+    def test_rejected_when_copy_failed(self):
+        """409 when copy job finished with error."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,        # idempotency
+                'mock_copy_job',  # copy guard
+            ]
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.finishedWithError)
+
+        response = self._post_plugin('guard-copyfail', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('finishedWithError', response.json['message'])
+
+    def test_rejected_when_copy_undefined(self):
+        """409 when copy job has undefined status."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,        # idempotency
+                'mock_copy_job',  # copy guard
+            ]
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.undefined)
+
+        response = self._post_plugin('guard-copyundef', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('undefined', response.json['message'])
+
+    def test_no_guard_for_zipfile_storage(self):
+        """Copy guard does not apply for out-of-network zipfile mode."""
+        self.app.config['PFCON_INNETWORK'] = False
+        self.app.config['STORAGE_ENV'] = 'zipfile'
+
+        try:
+            job_id = 'guard-zipfile'
+            incoming = os.path.join(self.tmpdir, 'key-' + job_id,
+                                    'incoming')
+            os.makedirs(incoming, exist_ok=True)
+
+            data = dict(self._plugin_data, jid=job_id)
+
+            # Create a minimal zip file for zipfile storage
+            import io
+            import zipfile
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w') as zf:
+                zf.writestr('test.txt', 'test')
+            zip_buf.seek(0)
+
+            with self.app.test_request_context():
+                url = url_for('api.pluginjoblist')
+
+            with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+                mgr = MockMgr.return_value
+                mgr.get_job.side_effect = ManagerException(
+                    'not found', status_code=404)
+                mgr.schedule_job.return_value = 'mock_plugin'
+                mgr.get_job_info.return_value = _make_job_info(
+                    JobStatus.notStarted)
+
+                response = self.client.post(
+                    url,
+                    data={**data, 'data_file': (zip_buf, 'data.zip')},
+                    headers=self.headers,
+                    content_type='multipart/form-data')
+
+            self.assertEqual(response.status_code, 201)
+            mgr.schedule_job.assert_called_once()
+        finally:
+            self.app.config['PFCON_INNETWORK'] = True
+            self.app.config['STORAGE_ENV'] = 'fslink'
+
+
+class TestUploadJobPluginGuard(NewResourcesTestBase):
+    """Safeguard: upload job requires a successfully completed plugin job
+    in swift in-network mode."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.config['STORAGE_ENV'] = 'swift'
+        self.app.config.setdefault('SWIFT_CONNECTION_PARAMS', {
+            'user': 'u', 'key': 'k',
+            'authurl': 'http://swift:8080/auth/v1.0',
+        })
+        self.app.config.setdefault('SWIFT_CONTAINER_NAME', 'users')
+
+    def tearDown(self):
+        self.app.config['STORAGE_ENV'] = 'fslink'
+        super().tearDown()
+
+    def _post_upload(self, job_id, mgr_setup):
+        data = {'jid': job_id, 'job_output_path': 'foo/output'}
+
+        with self.app.test_request_context():
+            url = url_for('api.uploadjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr_setup(mgr)
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+        return response
+
+    def test_rejected_when_no_plugin_job(self):
+        """409 when no plugin job exists."""
+        def setup(mgr):
+            mgr.get_job.side_effect = ManagerException(
+                'not found', status_code=404)
+
+        response = self._post_upload('guard-noplugin', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('No plugin job found', response.json['message'])
+
+    def test_rejected_when_plugin_started(self):
+        """409 when plugin job is still running."""
+        def setup(mgr):
+            mgr.get_job.return_value = 'mock_plugin'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started)
+
+        response = self._post_upload('guard-plugrun', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('started', response.json['message'])
+        self.assertIn('plugin job', response.json['message'].lower())
+
+    def test_rejected_when_plugin_not_started(self):
+        """409 when plugin job hasn't started yet."""
+        def setup(mgr):
+            mgr.get_job.return_value = 'mock_plugin'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.notStarted)
+
+        response = self._post_upload('guard-plugns', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('notStarted', response.json['message'])
+
+    def test_rejected_when_plugin_failed(self):
+        """409 when plugin job finished with error."""
+        def setup(mgr):
+            mgr.get_job.return_value = 'mock_plugin'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.finishedWithError)
+
+        response = self._post_upload('guard-plugfail', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('finishedWithError', response.json['message'])
+
+    def test_rejected_when_plugin_undefined(self):
+        """409 when plugin job has undefined status."""
+        def setup(mgr):
+            mgr.get_job.return_value = 'mock_plugin'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.undefined)
+
+        response = self._post_upload('guard-plugundef', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('undefined', response.json['message'])
+
+    def test_noop_skips_guard_for_fslink(self):
+        """Upload guard does not apply for fslink (upload is a no-op)."""
+        self.app.config['STORAGE_ENV'] = 'fslink'
+
+        data = {'jid': 'guard-fslink', 'job_output_path': 'foo/output'}
+        with self.app.test_request_context():
+            url = url_for('api.uploadjoblist')
+        response = self.client.post(url, data=data, headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['compute']['message'],
+                         'uploadSkipped')
+
+
+class TestDeleteJobSiblingGuard(NewResourcesTestBase):
+    """Safeguard: delete job requires all sibling jobs (copy, plugin,
+    upload) to be in a terminal state or not exist."""
+
+    def _post_delete(self, job_id, mgr_setup):
+        # Ensure key dir exists (delete skips if missing)
+        key_dir = os.path.join(self.tmpdir, 'key-' + job_id)
+        os.makedirs(key_dir, exist_ok=True)
+
+        data = {'jid': job_id}
+
+        with self.app.test_request_context():
+            url = url_for('api.deletejoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr_setup(mgr)
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+        return response
+
+    def test_rejected_when_copy_running(self):
+        """409 when copy job is still running."""
+        def setup(mgr):
+            mgr.get_job.return_value = 'mock_copy'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started)
+
+        response = self._post_delete('guard-delcopy', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('copy', response.json['message'])
+        self.assertIn('started', response.json['message'])
+
+    def test_rejected_when_copy_not_started(self):
+        """409 when copy job hasn't started yet."""
+        def setup(mgr):
+            mgr.get_job.return_value = 'mock_copy'
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.notStarted)
+
+        response = self._post_delete('guard-delcopyns', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('copy', response.json['message'])
+        self.assertIn('notStarted', response.json['message'])
+
+    def test_rejected_when_plugin_running(self):
+        """409 when plugin job is still running."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,       # copy guard: not found → pass
+                'mock_plugin',   # plugin guard
+            ]
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started)
+
+        response = self._post_delete('guard-delplug', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('plugin', response.json['message'])
+
+    def test_rejected_when_plugin_not_started(self):
+        """409 when plugin job hasn't started yet."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,       # copy guard: not found → pass
+                'mock_plugin',   # plugin guard
+            ]
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.notStarted)
+
+        response = self._post_delete('guard-delplugns', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('plugin', response.json['message'])
+
+    def test_rejected_when_upload_running(self):
+        """409 when upload job is still running."""
+        not_found = ManagerException('not found', status_code=404)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,       # copy guard: not found → pass
+                not_found,       # plugin guard: not found → pass
+                'mock_upload',   # upload guard
+            ]
+            mgr.get_job_info.return_value = _make_job_info(
+                JobStatus.started)
+
+        response = self._post_delete('guard-delupload', setup)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('upload', response.json['message'])
+
+    def test_allowed_when_all_siblings_terminal(self):
+        """201 when all sibling jobs are in terminal states."""
+        not_found = ManagerException('not found', status_code=404)
+        del_info = _make_job_info(JobStatus.notStarted)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                'mock_copy',     # copy guard: finishedSuccessfully
+                'mock_plugin',   # plugin guard: finishedWithError
+                'mock_upload',   # upload guard: undefined
+                not_found,       # idempotency: not found
+            ]
+            mgr.get_job_info.side_effect = [
+                _make_job_info(JobStatus.finishedSuccessfully),
+                _make_job_info(JobStatus.finishedWithError),
+                _make_job_info(JobStatus.undefined),
+                del_info,  # schedule response
+            ]
+            mgr.schedule_job.return_value = 'mock_del_job'
+
+        response = self._post_delete('guard-delok', setup)
+        self.assertEqual(response.status_code, 201)
+
+    def test_allowed_when_no_sibling_jobs(self):
+        """201 when no sibling jobs exist at all."""
+        not_found = ManagerException('not found', status_code=404)
+        del_info = _make_job_info(JobStatus.notStarted)
+
+        def setup(mgr):
+            mgr.get_job.side_effect = [
+                not_found,  # copy guard
+                not_found,  # plugin guard
+                not_found,  # upload guard
+                not_found,  # idempotency
+            ]
+            mgr.schedule_job.return_value = 'mock_del_job'
+            mgr.get_job_info.return_value = del_info
+
+        response = self._post_delete('guard-delnone', setup)
+        self.assertEqual(response.status_code, 201)
+
+    def test_noop_skips_guard_when_no_key_dir(self):
+        """Delete skips all guards if key directory doesn't exist."""
+        job_id = 'guard-nodir'
+        # Do NOT create key dir
+
+        data = {'jid': job_id}
+        with self.app.test_request_context():
+            url = url_for('api.deletejoblist')
+
+        response = self.client.post(url, data=data, headers=self.headers)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['compute']['message'],
+                         'deleteSkipped')

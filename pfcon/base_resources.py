@@ -60,10 +60,16 @@ class BaseJobList(Resource):
             'server_version': app.config.get('SERVER_VERSION'),
             'pfcon_innetwork': self.pfcon_innetwork,
             'storage_env': self.storage_env,
+            'requires_copy_job': False,
+            'requires_upload_job': False,
             'container_env': self.container_env,
             'compute_volume_type': self.compute_volume_type,
         }
+        if self.pfcon_innetwork and self.storage_env in ('fslink', 'swift'):
+            response['requires_copy_job'] = True
+        
         if self.pfcon_innetwork and self.storage_env == 'swift':
+            response['requires_upload_job'] = True
             response['swift_auth_url'] = (
                 app.config['SWIFT_CONNECTION_PARAMS']['authurl'])
         return response

@@ -339,15 +339,15 @@ if (( ! b_skipUnitTests )) ; then
     sleep 5
     if [[ "$CONTAINER_ENV" =~ ^(docker|swarm)$ ]]; then
         if (( b_pfconInNetwork )) && [[ $STORAGE_ENV == 'swift' ]]; then
-            docker exec $pfcon_dev pixi run -e local pytest tests/test_new_resources_mocked.py tests/test_new_resources_swift.py tests/compute --color=yes
+            docker exec $pfcon_dev pixi run -e local pytest tests/test_resources_mocked.py tests/test_resources_swift.py tests/compute --color=yes
         else
-            docker exec $pfcon_dev pixi run -e local pytest tests/test_new_resources_mocked.py tests/test_new_resources_fslink.py tests/compute --color=yes
+            docker exec $pfcon_dev pixi run -e local pytest tests/test_resources_mocked.py tests/test_resources_fslink.py tests/compute --color=yes
         fi
     elif [[ $CONTAINER_ENV == kubernetes ]]; then
         if (( b_pfconInNetwork )) && [[ $STORAGE_ENV == 'swift' ]]; then
-            kubectl exec $pfcon_dev -- pixi run -e local pytest tests/test_new_resources_mocked.py tests/test_new_resources_swift.py tests/compute --color=yes
+            kubectl exec $pfcon_dev -- pixi run -e local pytest tests/test_resources_mocked.py tests/test_resources_swift.py tests/compute --color=yes
         else
-            kubectl exec $pfcon_dev -- pixi run -e local pytest tests/test_new_resources_mocked.py tests/test_new_resources_fslink.py tests/compute --color=yes
+            kubectl exec $pfcon_dev -- pixi run -e local pytest tests/test_resources_mocked.py tests/test_resources_fslink.py tests/compute --color=yes
         fi
     fi
     status=$?

@@ -325,19 +325,62 @@ class TestUploadIdempotencySwift(NewResourcesSwiftTests):
         """Calling POST /uploadjobs/ twice should not schedule a second
         container if the first one is still running or succeeded."""
         job_id = 'new-swift-idemp-1'
-
-        # Create storebase key dir with output files
         key_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
-        outgoing = os.path.join(key_dir, 'outgoing')
-        os.makedirs(outgoing, exist_ok=True)
-        with open(os.path.join(outgoing, 'result.txt'), 'w') as f:
-            f.write('idempotency test data')
 
         try:
+            # Run copy + plugin first so the plugin guard passes
             with self.app.test_request_context():
+                copy_list_url = url_for('api.copyjoblist')
+                copy_url = url_for('api.copyjob', job_id=job_id)
+                plugin_list_url = url_for('api.pluginjoblist')
+                plugin_url = url_for('api.pluginjob', job_id=job_id)
                 upload_list_url = url_for('api.uploadjoblist')
                 upload_url = url_for('api.uploadjob', job_id=job_id)
 
+            copy_data = {
+                'jid': job_id,
+                'input_dirs': [self.swift_input_path],
+                'output_dir': self.swift_output_path,
+            }
+            response = self.client.post(copy_list_url, data=copy_data,
+                                        headers=self.headers)
+            self.assertEqual(response.status_code, 201)
+
+            for _ in range(30):
+                time.sleep(3)
+                response = self.client.get(copy_url, headers=self.headers)
+                if response.json['compute']['status'] == 'finishedSuccessfully':
+                    break
+            self.assertEqual(response.json['compute']['status'],
+                             'finishedSuccessfully')
+
+            plugin_data = {
+                'jid': job_id,
+                'entrypoint': ['python3', '/usr/local/bin/simplefsapp'],
+                'args': ['--dir', '/share/incoming'],
+                'auid': 'cube',
+                'number_of_workers': '1',
+                'cpu_limit': '1000',
+                'memory_limit': '200',
+                'gpu_limit': '0',
+                'image': 'fnndsc/pl-simplefsapp',
+                'type': 'fs',
+                'input_dirs': [self.swift_input_path],
+                'output_dir': self.swift_output_path,
+            }
+            response = self.client.post(plugin_list_url, data=plugin_data,
+                                        headers=self.headers)
+            self.assertEqual(response.status_code, 201)
+
+            for _ in range(30):
+                time.sleep(3)
+                response = self.client.get(plugin_url, headers=self.headers)
+                if response.json['compute']['status'] == 'finishedSuccessfully':
+                    break
+            self.assertEqual(response.json['compute']['status'],
+                             'finishedSuccessfully')
+
+            # Now test upload idempotency
             upload_data = {
                 'jid': job_id,
                 'job_output_path': self.swift_output_path,
@@ -363,13 +406,14 @@ class TestUploadIdempotencySwift(NewResourcesSwiftTests):
             self.assertEqual(response.json['compute']['status'],
                              'finishedSuccessfully')
 
-            # Verify file was uploaded to Swift
+            # Verify files were uploaded to Swift
             swift_files = list(self.swift_manager.ls(self.swift_output_path))
-            uploaded = [f for f in swift_files if 'result.txt' in f]
-            self.assertGreater(len(uploaded), 0)
+            self.assertGreater(len(swift_files), 0,
+                               'Files should be uploaded to Swift')
 
         finally:
-            self._remove_container(job_id + '-upload')
+            for suffix in ('-copy', '', '-upload'):
+                self._remove_container(job_id + suffix)
             if os.path.isdir(key_dir):
                 shutil.rmtree(key_dir)
 
