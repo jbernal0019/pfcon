@@ -279,6 +279,45 @@ class TestCopyJobList(NewResourcesTestBase):
             self.app.config['PFCON_INNETWORK'] = original
             self.app.config['STORAGE_ENV'] = 'fslink'
 
+    def test_post_empty_input_dirs_schedules_copy_container(self):
+        """Copy with no input_dirs still creates the container (it will do
+        nothing and exit 0 — useful for fs-type plugins)."""
+        job_id = 'copy-empty-1'
+        data = {
+            'jid': job_id,
+            'output_dir': 'home/foo/feed/output',
+            # no input_dirs sent — empty list by default
+        }
+
+        copy_info = _make_job_info(JobStatus.notStarted)
+
+        with self.app.test_request_context():
+            url = url_for('api.copyjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.get_job.side_effect = [
+                ManagerException('not found', status_code=404),
+            ]
+            mgr.schedule_job.return_value = 'mock_copy_job'
+            mgr.get_job_info.return_value = copy_info
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIn('compute', response.json)
+        # Container must still be scheduled
+        mgr.schedule_job.assert_called_once()
+
+        # job_params.json must have been written with an empty input_dirs list
+        params_file = os.path.join(self.tmpdir, 'key-' + job_id,
+                                   'job_params.json')
+        self.assertTrue(os.path.isfile(params_file))
+        with open(params_file) as f:
+            saved = json.load(f)
+        self.assertEqual(saved['input_dirs'], [])
+
 
 class TestCopyJob(NewResourcesTestBase):
 
@@ -535,6 +574,54 @@ class TestPluginJobList(NewResourcesTestBase):
 
         self.assertEqual(response.status_code, 201)
         mgr.remove_job.assert_called_once_with(mock_undef)
+        mgr.schedule_job.assert_called_once()
+
+    def test_post_empty_input_dirs_allowed_for_fslink(self):
+        """For fslink storage the plugin POST accepts no input_dirs (e.g. fs-type
+        plugins that generate their own data and have nothing to copy)."""
+        job_id = 'plugin-empty-1'
+
+        # Copy worker creates incoming dir even when input_dirs is empty
+        incoming = os.path.join(self.tmpdir, 'key-' + job_id, 'incoming')
+        os.makedirs(incoming, exist_ok=True)
+
+        data = {
+            'jid': job_id,
+            'entrypoint': ['python3', '/usr/local/bin/simplefsapp'],
+            'args': ['/share/outgoing'],
+            'auid': 'cube',
+            'number_of_workers': '1',
+            'cpu_limit': '1000',
+            'memory_limit': '200',
+            'gpu_limit': '0',
+            'image': 'fnndsc/pl-simplefsapp',
+            'type': 'fs',
+            # no input_dirs sent — empty list by default
+            'output_dir': 'home/foo/feed/output',
+        }
+
+        plugin_info = _make_job_info(JobStatus.notStarted,
+                                     image='fnndsc/pl-simplefsapp')
+
+        with self.app.test_request_context():
+            url = url_for('api.pluginjoblist')
+
+        with mock.patch('pfcon.base_resources.DockerManager') as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.get_job.side_effect = [
+                ManagerException('not found', status_code=404),  # idempotency
+                'mock_copy_job',  # copy guard
+            ]
+            mgr.schedule_job.return_value = 'mock_plugin_job'
+            mgr.get_job_info.side_effect = [
+                _make_job_info(JobStatus.finishedSuccessfully),  # copy guard
+                plugin_info,  # schedule response
+            ]
+
+            response = self.client.post(url, data=data,
+                                        headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
         mgr.schedule_job.assert_called_once()
 
 

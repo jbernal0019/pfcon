@@ -125,8 +125,8 @@ parser_plugin.add_argument('data_file', dest='data_file', required=False,
 
 parser_copy = reqparse.RequestParser(bundle_errors=True)
 parser_copy.add_argument('jid', dest='jid', required=True, location='form')
-parser_copy.add_argument('input_dirs', dest='input_dirs', required=True,
-                         type=str, action='append', location='form')
+parser_copy.add_argument('input_dirs', dest='input_dirs', required=False,
+                         type=str, action='append', location='form', default=[])
 parser_copy.add_argument('output_dir', dest='output_dir', required=True,
                          location='form')
 parser_copy.add_argument('cpu_limit', dest='cpu_limit', type=int,
@@ -400,8 +400,13 @@ class PluginJobList(BaseJobList):
 
     def _validate_data(self, args):
         if self.pfcon_innetwork:
-            if args.input_dirs is None:
-                abort(400, message='input_dirs: field is required')
+            # For fslink/swift the plugin POST never reads input_dirs from args
+            # (data was already staged by the copy worker into key-<jid>/incoming/).
+            # For filesystem storage args.input_dirs[0] is used directly, so it
+            # must be present and non-empty.
+            if self.storage_env not in ('fslink', 'swift'):
+                if not args.input_dirs:
+                    abort(400, message='input_dirs: field is required')
             if args.output_dir is None:
                 abort(400, message='output_dir: field is required')
         else:
