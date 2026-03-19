@@ -133,6 +133,10 @@ class TestCopyJobList(NewResourcesTestBase):
         scheduled_name = mgr.schedule_job.call_args[0][2]
         self.assertEqual(scheduled_name, job_id + '-copy')
 
+        # fslink copy needs input mount (storebase root)
+        mounts = mgr.schedule_job.call_args[0][7]
+        self.assertNotEqual(mounts['inputdir_source'], '')
+
     def test_post_idempotent_existing_copy(self):
         """If copy container already exists and is running, return
         its status without scheduling a new one."""
@@ -789,6 +793,10 @@ class TestUploadJobList(NewResourcesTestBase):
             scheduled_name = mgr.schedule_job.call_args[0][2]
             self.assertEqual(scheduled_name, job_id + '-upload')
 
+            # upload worker needs no input mount
+            mounts = mgr.schedule_job.call_args[0][7]
+            self.assertEqual(mounts['inputdir_source'], '')
+
             # upload_params.json should exist
             params_file = os.path.join(key_dir, 'upload_params.json')
             self.assertTrue(os.path.isfile(params_file))
@@ -973,6 +981,10 @@ class TestDeleteJobList(NewResourcesTestBase):
         # Scheduled with '-delete' suffix
         scheduled_name = mgr.schedule_job.call_args[0][2]
         self.assertEqual(scheduled_name, job_id + '-delete')
+
+        # delete worker needs no input mount
+        mounts = mgr.schedule_job.call_args[0][7]
+        self.assertEqual(mounts['inputdir_source'], '')
 
     def test_post_noop_when_no_key_dir(self):
         """If the key directory doesn't exist, return success immediately."""

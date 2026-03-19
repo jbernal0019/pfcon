@@ -122,22 +122,33 @@ class BaseJobList(Resource):
         ]
 
     def _schedule_container(self, image, cmd, job_name, resources_dict,
-                            env_vars, mounts_dict, jid_for_response=None):
+                            env_vars, mounts_dict, jid_for_response=None,
+                            pfcon_user=False):
         """
         Schedule a container on the compute cluster and return the standard
         response dict.
+
+        If pfcon_user is True the container runs as the same uid/gid as the
+        pfcon process itself (useful for the delete worker so that it has the
+        same filesystem permissions as the process that created the data).
         """
         jid = jid_for_response or job_name
 
         logger.info(f'Scheduling job {job_name} on the '
                     f'{self.container_env} cluster')
 
+        if pfcon_user:
+            uid = os.getuid()
+            gid = os.getgid()
+        else:
+            uid = self.user.get_uid()
+            gid = self.user.get_gid()
+
         compute_mgr = get_compute_mgr(self.container_env)
         try:
             job = compute_mgr.schedule_job(image, cmd, job_name,
                                            resources_dict, env_vars,
-                                           self.user.get_uid(),
-                                           self.user.get_gid(), mounts_dict)
+                                           uid, gid, mounts_dict)
         except ManagerException as e:
             logger.error(f'Error from {self.container_env} while scheduling '
                          f'job {job_name}, detail: {str(e)}')

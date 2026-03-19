@@ -16,13 +16,28 @@ files, and exits with 0 on success or non-zero on failure.
 import json
 import os
 import sys
-import shutil
 import logging
 
 
 logging.basicConfig(level=logging.INFO,
                     format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _rmtree(path):
+    """
+    Remove a directory tree using full absolute paths.
+
+    Python 3.13's shutil.rmtree uses dir_fd-based operations (unlinkat syscall)
+    which can fail on Docker bind mounts. This implementation avoids that by
+    using os.unlink/os.rmdir with full paths.
+    """
+    for dirpath, dirnames, filenames in os.walk(path, topdown=False):
+        for name in filenames:
+            os.unlink(os.path.join(dirpath, name))
+        for name in dirnames:
+            os.rmdir(os.path.join(dirpath, name))
+    os.rmdir(path)
 
 
 def do_delete(key_dir):
@@ -39,7 +54,7 @@ def do_delete(key_dir):
     for subdir in ('incoming', 'outgoing'):
         path = os.path.join(key_dir, subdir)
         if os.path.isdir(path):
-            shutil.rmtree(path)
+            _rmtree(path)
             logger.info(f'Removed {subdir}/ for job {job_id}')
 
     # Remove leftover param files

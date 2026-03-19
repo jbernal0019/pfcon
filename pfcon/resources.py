@@ -219,17 +219,17 @@ class CopyJobList(BaseJobList):
             'gpu_limit': 0,
         }
 
-        # For fslink: inputdir -> storebase root (read-only)
-        # For swift: inputdir -> key dir (unused but valid)
+        # For fslink: inputdir -> storebase root (read-only shared filesystem)
+        # For swift: no input mount needed (copy worker reads from network)
         if self.storage_env == 'fslink':
             if self.compute_volume_type in ('host', 'docker_local_volume'):
                 inputdir_override = app.config.get('STOREBASE')
             else:
                 inputdir_override = ''  # PVC root
+            mounts_dict = self._build_key_mounts(job_id, inputdir_override)
         else:
-            inputdir_override = None  # default (key dir)
-
-        mounts_dict = self._build_key_mounts(job_id, inputdir_override)
+            mounts_dict = self._build_key_mounts(job_id)
+            mounts_dict['inputdir_source'] = ''  # swift copy reads from network
 
         copy_env = []
         if self.storage_env == 'swift':
@@ -452,12 +452,11 @@ class PluginJobFile(Resource):
         download_name = f'{job_id}.zip'
         mimetype = 'application/zip'
 
-        if self.pfcon_innetwork and self.storage_env in ('filesystem',
-                                                          'fslink'):
+        if self.pfcon_innetwork and self.storage_env in ('filesystem', 'fslink'):
             job_output_path = request.args.get('job_output_path')
+
             if not job_output_path:
-                abort(400,
-                      message='job_output_path: query parameter is required')
+                abort(400, message='job_output_path: query parameter is required')
 
             job_output_path = job_output_path.strip('/')
             outgoing_dir = os.path.join(self.storebase_mount, job_output_path)
@@ -480,8 +479,7 @@ class PluginJobFile(Resource):
 
             if job_output_path:
                 job_output_path = job_output_path.lstrip('/')
-                job_dir = os.path.join(self.storebase_mount,
-                                       'key-' + job_id)
+                job_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
                 outgoing_dir = os.path.join(job_dir, 'outgoing')
                 if not os.path.exists(outgoing_dir):
                     os.mkdir(outgoing_dir)
@@ -490,16 +488,18 @@ class PluginJobFile(Resource):
                 content = storage.get_output_metadata(
                     job_id, outgoing_dir,
                     job_output_path=job_output_path)
+                
                 download_name = f'{job_id}.json'
                 mimetype = 'application/json'
             else:
-                job_dir = os.path.join(self.storebase_mount,
-                                       'key-' + job_id)
+                job_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
                 if not os.path.isdir(job_dir):
                     abort(404)
+
                 outgoing_dir = os.path.join(job_dir, 'outgoing')
                 if not os.path.exists(outgoing_dir):
                     os.mkdir(outgoing_dir)
+
                 storage = ZipFileStorage(app.config)
                 content = storage.get_data(job_id, outgoing_dir)
         else:
@@ -598,6 +598,7 @@ class UploadJobList(BaseJobList):
         }
 
         mounts_dict = self._build_key_mounts(job_id)
+        mounts_dict['inputdir_source'] = ''  # upload worker needs no input mount
         upload_env = self._build_swift_env()
 
         job, d_compute = self._schedule_container(
@@ -704,10 +705,11 @@ class DeleteJobList(BaseJobList):
         }
 
         mounts_dict = self._build_key_mounts(job_id)
+        mounts_dict['inputdir_source'] = ''  # delete worker needs no input mount
 
         _, d_compute = self._schedule_container(
             op_image, delete_cmd, delete_name, resources_dict, [],
-            mounts_dict, jid_for_response=job_id)
+            mounts_dict, jid_for_response=job_id, pfcon_user=True)
 
         return {'compute': d_compute}, 201
 
