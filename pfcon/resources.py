@@ -237,7 +237,7 @@ class CopyJobList(BaseJobList):
 
         job, d_compute = self._schedule_container(
             op_image, copy_cmd, copy_name, resources_dict, copy_env,
-            mounts_dict, jid_for_response=job_id)
+            mounts_dict, jid_for_response=job_id, pfcon_user=True)
 
         # For swift+docker: connect to pfcon's network for Swift DNS
         if self.storage_env == 'swift' and self.container_env == 'docker':
@@ -603,7 +603,7 @@ class UploadJobList(BaseJobList):
 
         job, d_compute = self._schedule_container(
             op_image, upload_cmd, upload_name, resources_dict, upload_env,
-            mounts_dict, jid_for_response=job_id)
+            mounts_dict, jid_for_response=job_id, pfcon_user=True)
 
         # For docker: connect to pfcon's network for Swift DNS
         if self.container_env == 'docker':
