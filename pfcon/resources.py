@@ -132,7 +132,7 @@ parser_copy.add_argument('output_dir', dest='output_dir', required=True,
 parser_copy.add_argument('cpu_limit', dest='cpu_limit', type=int,
                          location='form', default=1000)
 parser_copy.add_argument('memory_limit', dest='memory_limit', type=int,
-                         location='form', default=200)
+                         location='form', default=300)
 
 parser_upload = reqparse.RequestParser(bundle_errors=True)
 parser_upload.add_argument('jid', dest='jid', required=True, location='form')
@@ -141,14 +141,14 @@ parser_upload.add_argument('job_output_path', dest='job_output_path',
 parser_upload.add_argument('cpu_limit', dest='cpu_limit', type=int,
                            location='form', default=1000)
 parser_upload.add_argument('memory_limit', dest='memory_limit', type=int,
-                           location='form', default=200)
+                           location='form', default=300)
 
 parser_delete = reqparse.RequestParser(bundle_errors=True)
 parser_delete.add_argument('jid', dest='jid', required=True, location='form')
 parser_delete.add_argument('cpu_limit', dest='cpu_limit', type=int,
                            location='form', default=1000)
 parser_delete.add_argument('memory_limit', dest='memory_limit', type=int,
-                           location='form', default=200)
+                           location='form', default=300)
 
 
 # ---------------------------------------------------------------------------
@@ -308,11 +308,11 @@ class PluginJobList(BaseJobList):
 
             if self.storage_env == 'swift':
                 output_dir = 'key-' + job_id + '/outgoing'
+                outgoing_dir = os.path.join(self.storebase_mount, output_dir)
+                os.makedirs(outgoing_dir, exist_ok=True)
+                os.chmod(outgoing_dir, 0o777)
             else:
                 output_dir = args.output_dir.strip('/')
-
-            outgoing_dir = os.path.join(self.storebase_mount, output_dir)
-            os.makedirs(outgoing_dir, exist_ok=True)
 
             d_compute = self._process_compute(args, job_id, input_dir,
                                               output_dir)
@@ -559,15 +559,14 @@ class UploadJobList(BaseJobList):
         try:
             plugin_job = compute_mgr.get_job(job_id)
             plugin_info = compute_mgr.get_job_info(plugin_job)
-            if plugin_info.status != JobStatus.finishedSuccessfully:
-                abort(409, message=f'Plugin job has not completed '
-                                   f'successfully (status: '
+            if plugin_info.status not in (JobStatus.finishedSuccessfully, 
+                                          JobStatus.finishedWithError):
+                abort(409, message=f'Plugin job has not completed yet (status: '
                                    f'{plugin_info.status.value}). The plugin '
                                    f'job must finish before uploading.')
         except ManagerException:
             abort(409, message='No plugin job found. A plugin job must '
-                               'complete successfully before scheduling '
-                               'an upload job.')
+                               'complete before scheduling an upload job.')
 
         upload_name = job_id + '-upload'
 
