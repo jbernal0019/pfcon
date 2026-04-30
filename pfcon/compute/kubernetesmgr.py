@@ -163,12 +163,7 @@ class KubernetesManager(AbstractManager[V1Job]):
             env.append(k_client.V1EnvVar(name=key, value=val))
 
         if gpu_limit > 0:
-            # ref: https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/
             limits['nvidia.com/gpu'] = gpu_limit
-            env.append(k_client.V1EnvVar(name='NVIDIA_VISIBLE_DEVICES', value='all'))
-            env.append(k_client.V1EnvVar(name='NVIDIA_DRIVER_CAPABILITIES',
-                                         value='compute,utility'))
-            env.append(k_client.V1EnvVar(name='NVIDIA_REQUIRE_CUDA', value='cuda>=9.0'))
 
         security_context = {
             'allow_privilege_escalation': False,
