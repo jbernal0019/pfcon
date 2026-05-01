@@ -96,7 +96,7 @@ class HealthCheck(Resource):
 
 parser_plugin = reqparse.RequestParser(bundle_errors=True)
 parser_plugin.add_argument('jid', dest='jid', required=True, location='form')
-parser_plugin.add_argument('args', dest='args', required=True, type=str,
+parser_plugin.add_argument('args', dest='args', type=str,
                            action='append', location='form', default=[])
 parser_plugin.add_argument('args_path_flags', dest='args_path_flags', type=str,
                            action='append', location='form', default=[])
