@@ -10,6 +10,8 @@ is mocked and only the in-memory V1Job is built via create_job.
 import unittest
 from unittest import mock
 
+from pfcon.compute.abstractmgr import ManagerException
+
 
 class TestKubernetesManagerCreateJob(unittest.TestCase):
 
@@ -119,6 +121,28 @@ class TestKubernetesManagerCreateJob(unittest.TestCase):
         vms = self._get_vol_mounts(job)
         inmount = next(vm for vm in vms if vm.mount_path == '/share/incoming')
         self.assertEqual(inmount.sub_path, 'key-jid-4/incoming')
+
+    def test_empty_outputdir_source_raises(self):
+        """A falsy outputdir_source ('' or None) would mount the entire PVC
+        root over /share/outgoing (subPath is ignored when empty in k8s),
+        exposing every job's data to the container. create_job must refuse
+        and never submit such a Job."""
+        mgr = self._make_manager()
+        for bad_value in ('', None):
+            with self.subTest(outputdir_source=bad_value):
+                mounts = {
+                    'inputdir_source': None,
+                    'inputdir_target': '/share/incoming',
+                    'outputdir_source': bad_value,
+                    'outputdir_target': '/share/outgoing',
+                }
+                with self.assertRaises(ManagerException) as cm:
+                    mgr.create_job(
+                        'img', ['python'], 'jid-bad', self._resources(),
+                        [], None, None, mounts
+                    )
+                self.assertEqual(cm.exception.status_code, 500)
+                self.assertIn('outputdir_source', str(cm.exception))
 
     def test_job_type_label_uses_k8s_convention(self):
         """Kubernetes label key must be `chrisproject.org/job-type`,

@@ -225,7 +225,7 @@ class CopyJobList(BaseJobList):
         if self.storage_env == 'fslink':
             if self.compute_volume_type in ('host', 'docker_local_volume'):
                 inputdir_override = app.config.get('STOREBASE')
-            else:
+            elif self.compute_volume_type == 'kubernetes_pvc':
                 inputdir_override = ''  # PVC root
             mounts_dict = self._build_key_mounts(job_id, inputdir_override)
         else:

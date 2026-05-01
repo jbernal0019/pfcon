@@ -14,6 +14,8 @@ Tests cover:
 - DeleteJobList POST: schedules delete container
 - DeleteJob GET/DELETE: returns/removes delete container
 - No-op behavior for storage modes that don't need copy/upload
+- End-to-end kubernetes_pvc volume mount sub_path (regression #162)
+- CONTAINER_ENV <-> COMPUTE_VOLUME_TYPE config validation
 """
 
 import json
@@ -1563,3 +1565,363 @@ class TestDeleteJobSiblingGuard(NewResourcesTestBase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json['compute']['message'],
                          'deleteSkipped')
+
+
+# ---------------------------------------------------------------------------
+# End-to-end kubernetes_pvc volume mount tests
+# ---------------------------------------------------------------------------
+
+class TestKubernetesPvcSubPathE2E(TestCase):
+    """End-to-end regression tests for FNNDSC/pfcon#162.
+
+    Exercise the full path REST POST -> resources.py -> base_resources.py
+    -> KubernetesManager.create_job, asserting that the V1Job submitted to
+    the cluster has V1VolumeMount.sub_path = 'key-<jid>' on the output
+    mount. The earlier unit tests in tests/compute/test_kubernetesmgr.py
+    only cover the manager in isolation with a hand-built mounts_dict;
+    they don't catch a regression where the API layer fails to populate
+    outputdir_source.
+    """
+
+    def setUp(self):
+        from datetime import datetime
+        from kubernetes import client as k_client
+        from kubernetes.client.rest import ApiException
+        self._k_client = k_client
+        self._ApiException = ApiException
+        self._datetime = datetime
+
+        logging.disable(logging.WARNING)
+        self.tmpdir = tempfile.mkdtemp()
+
+        # Patch kubernetes API for the lifetime of the test so importing
+        # KubernetesManager and instantiating it does not require a cluster.
+        patch_targets = (
+            'pfcon.compute.kubernetesmgr.k_config.load_incluster_config',
+            'pfcon.compute.kubernetesmgr.k_client.CoreV1Api',
+            'pfcon.compute.kubernetesmgr.k_client.BatchV1Api',
+        )
+        self._k_patches = [mock.patch(t) for t in patch_targets]
+        (self._mock_k_config,
+         self._mock_core_api,
+         self._mock_batch_api) = [p.start() for p in self._k_patches]
+        for p in self._k_patches:
+            self.addCleanup(p.stop)
+
+        env_patch = {
+            'APPLICATION_MODE': 'dev',
+            'CONTAINER_ENV': 'kubernetes',
+            'COMPUTE_VOLUME_TYPE': 'kubernetes_pvc',
+            'VOLUME_NAME': 'storebase-pvc',
+            'JOB_NAMESPACE': 'test-ns',
+            'STOREBASE_MOUNT': self.tmpdir,
+        }
+        with mock.patch.dict(os.environ, env_patch):
+            self.app = create_app({
+                'PFCON_INNETWORK': True,
+                'STORAGE_ENV': 'fslink',
+                'PFCON_OP_IMAGE': 'ghcr.io/fnndsc/pfconopjob:test',
+            })
+
+        self.client = self.app.test_client()
+        with self.app.test_request_context():
+            url = url_for('api.auth')
+            creds = {
+                'pfcon_user': self.app.config.get('PFCON_USER'),
+                'pfcon_password': self.app.config.get('PFCON_PASSWORD'),
+            }
+            r = self.client.post(url, data=json.dumps(creds),
+                                 content_type='application/json')
+            self.headers = {'Authorization': 'Bearer ' + r.json['token']}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        logging.disable(logging.NOTSET)
+
+    def _finished_v1job(self, name):
+        """Build a real V1Job in finishedSuccessfully state. Used so
+        get_job_info() can read status off it without further mocking."""
+        return self._k_client.V1Job(
+            metadata=self._k_client.V1ObjectMeta(name=name),
+            spec=self._k_client.V1JobSpec(
+                template=self._k_client.V1PodTemplateSpec(
+                    spec=self._k_client.V1PodSpec(
+                        restart_policy='Never',
+                        containers=[self._k_client.V1Container(
+                            name=name, image='img', command=['cmd'])],
+                    ),
+                ),
+            ),
+            status=self._k_client.V1JobStatus(
+                succeeded=1,
+                completion_time=self._datetime.now(),
+            ),
+        )
+
+    def _setup_batch_api(self, read_side_effect):
+        """Configure the patched BatchV1Api so every KubernetesManager()
+        instance shares the same batch_client mock. read_side_effect drives
+        read_namespaced_job (the get_job() call); create_namespaced_job
+        echoes back the V1Job body so we can inspect what was submitted.
+        """
+        batch_client = mock.MagicMock()
+        batch_client.read_namespaced_job.side_effect = read_side_effect
+
+        # Echo back the V1Job so we can inspect what was submitted, but
+        # add a default V1JobStatus so the subsequent get_job_info() call
+        # in _schedule_container doesn't blow up reading job.status.*.
+        k_client = self._k_client
+
+        def _create(body, namespace):
+            body.status = k_client.V1JobStatus()
+            return body
+        batch_client.create_namespaced_job.side_effect = _create
+        self._mock_batch_api.return_value = batch_client
+
+        core_client = mock.MagicMock()
+        core_client.list_namespaced_pod.return_value = mock.MagicMock(items=[])
+        self._mock_core_api.return_value = core_client
+
+        return batch_client
+
+    def _captured_v1job(self, batch_client):
+        return batch_client.create_namespaced_job.call_args.kwargs['body']
+
+    def _mount_by_path(self, v1job, path):
+        for m in v1job.spec.template.spec.containers[0].volume_mounts:
+            if m.mount_path == path:
+                return m
+        return None
+
+    def test_copy_job_kubernetes_pvc_sub_path(self):
+        """fslink + kubernetes_pvc copy job: output mount must have
+        sub_path=key-<jid>, input mount must mount the PVC root
+        (sub_path=None)."""
+        not_found = self._ApiException(status=404, reason='Not Found')
+        batch_client = self._setup_batch_api([not_found])  # idempotency check
+
+        job_id = 'k8s-copy-1'
+        data = {
+            'jid': job_id,
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+        with self.app.test_request_context():
+            url = url_for('api.copyjoblist')
+        response = self.client.post(url, data=data, headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        v1job = self._captured_v1job(batch_client)
+
+        out = self._mount_by_path(v1job, '/share/outgoing')
+        self.assertIsNotNone(out)
+        self.assertEqual(out.sub_path, 'key-' + job_id,
+                         'copy worker output mount must have sub_path=key-<jid>')
+        self.assertEqual(out.name, 'storebase')
+
+        in_ = self._mount_by_path(v1job, '/share/incoming')
+        self.assertIsNotNone(in_, 'fslink copy needs an input mount')
+        self.assertIsNone(in_.sub_path,
+                          'fslink copy input mount must be PVC root')
+
+    def test_delete_job_kubernetes_pvc_sub_path(self):
+        """delete job: output mount must have sub_path=key-<jid> and there
+        must be no input mount."""
+        not_found = self._ApiException(status=404, reason='Not Found')
+        # 4 read_namespaced_job calls: copy/plugin/upload sibling guards,
+        # then idempotency. All return 404.
+        batch_client = self._setup_batch_api([not_found] * 4)
+
+        job_id = 'k8s-del-1'
+        # Delete is skipped if key dir doesn't exist
+        os.makedirs(os.path.join(self.tmpdir, 'key-' + job_id, 'incoming'),
+                    exist_ok=True)
+
+        data = {'jid': job_id}
+        with self.app.test_request_context():
+            url = url_for('api.deletejoblist')
+        response = self.client.post(url, data=data, headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        v1job = self._captured_v1job(batch_client)
+
+        out = self._mount_by_path(v1job, '/share/outgoing')
+        self.assertIsNotNone(out)
+        self.assertEqual(out.sub_path, 'key-' + job_id)
+        self.assertIsNone(self._mount_by_path(v1job, '/share/incoming'),
+                          'delete worker must not have an input mount')
+
+    def test_upload_job_kubernetes_pvc_sub_path(self):
+        """swift + kubernetes_pvc upload job: output mount must have
+        sub_path=key-<jid> and there must be no input mount."""
+        # Swap to swift for this test (upload is a no-op for fslink).
+        self.app.config['STORAGE_ENV'] = 'swift'
+        self.app.config['SWIFT_CONNECTION_PARAMS'] = {
+            'user': 'u', 'key': 'k',
+            'authurl': 'http://swift:8080/auth/v1.0',
+        }
+        self.app.config['SWIFT_CONTAINER_NAME'] = 'users'
+
+        try:
+            not_found = self._ApiException(status=404, reason='Not Found')
+            job_id = 'k8s-upload-1'
+            # upload first reads the plugin job (must exist + finished),
+            # then reads the upload job for idempotency (404 = schedule fresh).
+            batch_client = self._setup_batch_api([
+                self._finished_v1job(job_id),
+                not_found,
+            ])
+
+            os.makedirs(os.path.join(self.tmpdir, 'key-' + job_id),
+                        exist_ok=True)
+
+            data = {'jid': job_id, 'job_output_path': 'foo/output'}
+            with self.app.test_request_context():
+                url = url_for('api.uploadjoblist')
+            response = self.client.post(url, data=data, headers=self.headers)
+
+            self.assertEqual(response.status_code, 201)
+            v1job = self._captured_v1job(batch_client)
+
+            out = self._mount_by_path(v1job, '/share/outgoing')
+            self.assertIsNotNone(out)
+            self.assertEqual(out.sub_path, 'key-' + job_id)
+            self.assertIsNone(self._mount_by_path(v1job, '/share/incoming'),
+                              'upload worker must not have an input mount')
+        finally:
+            self.app.config['STORAGE_ENV'] = 'fslink'
+
+    def test_plugin_job_kubernetes_pvc_sub_path(self):
+        """fslink plugin job: input mount must point to key-<jid>/incoming
+        and output mount must point to the user-supplied output_dir."""
+        not_found = self._ApiException(status=404, reason='Not Found')
+        job_id = 'k8s-plugin-1'
+        # plugin POST reads: idempotency (404), then the copy guard
+        # (must exist + finished).
+        batch_client = self._setup_batch_api([
+            not_found,
+            self._finished_v1job(job_id + '-copy'),
+        ])
+
+        # Pretend the copy already ran
+        os.makedirs(os.path.join(self.tmpdir, 'key-' + job_id, 'incoming'),
+                    exist_ok=True)
+
+        data = {
+            'jid': job_id,
+            'entrypoint': ['python3', '/usr/local/bin/simplefsapp'],
+            'args': ['--dir', '/share/incoming'],
+            'auid': 'cube',
+            'number_of_workers': '1',
+            'cpu_limit': '1000',
+            'memory_limit': '200',
+            'gpu_limit': '0',
+            'image': 'fnndsc/pl-simplefsapp',
+            'type': 'fs',
+            'input_dirs': ['home/foo/feed/input'],
+            'output_dir': 'home/foo/feed/output',
+        }
+        with self.app.test_request_context():
+            url = url_for('api.pluginjoblist')
+        response = self.client.post(url, data=data, headers=self.headers)
+
+        self.assertEqual(response.status_code, 201)
+        v1job = self._captured_v1job(batch_client)
+
+        in_ = self._mount_by_path(v1job, '/share/incoming')
+        self.assertIsNotNone(in_)
+        self.assertEqual(in_.sub_path, 'key-' + job_id + '/incoming')
+
+        out = self._mount_by_path(v1job, '/share/outgoing')
+        self.assertIsNotNone(out)
+        self.assertEqual(out.sub_path, 'home/foo/feed/output')
+
+
+class TestConfigValidation(TestCase):
+    """Config validation tests."""
+
+    def setUp(self):
+        logging.disable(logging.WARNING)
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        logging.disable(logging.NOTSET)
+
+    def _create_app(self, env):
+        env_patch = {
+            'APPLICATION_MODE': 'dev',
+            'STOREBASE_MOUNT': self.tmpdir,
+        }
+        env_patch.update(env)
+        # Tests set COMPUTE_VOLUME_TYPE explicitly when they want it set;
+        # ensure a value inherited from the parent shell doesn't leak in
+        # for tests that want it unset.
+        keys_to_clear = ('COMPUTE_VOLUME_TYPE', 'CONTAINER_ENV', 'VOLUME_NAME',
+                         'JOB_NAMESPACE', 'STOREBASE')
+        saved = {k: os.environ.pop(k) for k in keys_to_clear
+                 if k in os.environ and k not in env_patch}
+        try:
+            with mock.patch.dict(os.environ, env_patch, clear=False):
+                return create_app({
+                    'PFCON_INNETWORK': True,
+                    'STORAGE_ENV': 'fslink',
+                    'PFCON_OP_IMAGE': 'img:test',
+                })
+        finally:
+            os.environ.update(saved)
+
+    def test_kubernetes_without_volume_name_raises(self):
+        """CONTAINER_ENV=kubernetes auto-defaults COMPUTE_VOLUME_TYPE to
+        kubernetes_pvc, but VOLUME_NAME is still required and its absence
+        must crash startup with a clear message."""
+        with self.assertRaises(ValueError) as cm:
+            self._create_app({'CONTAINER_ENV': 'kubernetes'})
+        msg = str(cm.exception)
+        self.assertIn('VOLUME_NAME', msg)
+        self.assertIn('kubernetes_pvc', msg)
+
+    def test_kubernetes_defaults_to_kubernetes_pvc(self):
+        """CONTAINER_ENV=kubernetes alone (no COMPUTE_VOLUME_TYPE) must
+        default to kubernetes_pvc once VOLUME_NAME is supplied."""
+        app = self._create_app({
+            'CONTAINER_ENV': 'kubernetes',
+            'VOLUME_NAME': 'storebase-pvc',
+            'JOB_NAMESPACE': 'test-ns',
+        })
+        self.assertEqual(app.config['COMPUTE_VOLUME_TYPE'], 'kubernetes_pvc')
+
+    def test_kubernetes_with_host_volume_type_raises(self):
+        """kubernetes + host is invalid (host bind mounts don't apply)."""
+        with self.assertRaises(ValueError):
+            self._create_app({
+                'CONTAINER_ENV': 'kubernetes',
+                'COMPUTE_VOLUME_TYPE': 'host',
+            })
+
+    def test_kubernetes_with_kubernetes_pvc_ok(self):
+        """The correct config combo must start cleanly."""
+        app = self._create_app({
+            'CONTAINER_ENV': 'kubernetes',
+            'COMPUTE_VOLUME_TYPE': 'kubernetes_pvc',
+            'VOLUME_NAME': 'storebase-pvc',
+            'JOB_NAMESPACE': 'test-ns',
+        })
+        self.assertEqual(app.config['COMPUTE_VOLUME_TYPE'], 'kubernetes_pvc')
+
+    def test_swarm_with_pvc_volume_type_raises(self):
+        """swarm must reject kubernetes_pvc."""
+        with self.assertRaises(ValueError):
+            self._create_app({
+                'CONTAINER_ENV': 'swarm',
+                'COMPUTE_VOLUME_TYPE': 'kubernetes_pvc',
+            })
+
+    def test_docker_with_host_ok(self):
+        """docker + COMPUTE_VOLUME_TYPE=host is a valid combination."""
+        app = self._create_app({
+            'CONTAINER_ENV': 'docker',
+            'COMPUTE_VOLUME_TYPE': 'host',
+            'STOREBASE': self.tmpdir,
+        })
+        self.assertEqual(app.config['COMPUTE_VOLUME_TYPE'], 'host')
