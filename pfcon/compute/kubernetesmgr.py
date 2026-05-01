@@ -183,6 +183,17 @@ class KubernetesManager(AbstractManager[V1Job]):
             persistent_volume_claim=pvc,
 
         )
+        # A falsy outputdir_source would mount the entire PVC root over
+        # /share/outgoing, exposing every job's data to this op container
+        # and making op workers fail to find their per-job params files.
+        if not mounts_dict['outputdir_source']:
+            raise ManagerException(
+                f"outputdir_source must be a non-empty PVC sub_path "
+                f"(got {mounts_dict['outputdir_source']!r}); refusing to "
+                f"mount the storebase root at "
+                f"{mounts_dict['outputdir_target']!r}",
+                status_code=500,
+            )
         volume_mount_outputdir = k_client.V1VolumeMount(
             mount_path=mounts_dict['outputdir_target'],
             name='storebase',

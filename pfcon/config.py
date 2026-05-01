@@ -52,9 +52,28 @@ class Config:
         if self.CONTAINER_ENV == 'podman':  # podman is just an alias for docker
             self.CONTAINER_ENV = 'docker'
 
-        default_cv_type = 'docker_local_volume' if self.CONTAINER_ENV == 'docker' else None
+        # Fail fast for misconfigured CONTAINER_ENV or COMPUTE_VOLUME_TYPE.
+        valid_compute_volume_types = {
+            'docker': ('docker_local_volume', 'host'),
+            'swarm': ('host',),
+            'kubernetes': ('kubernetes_pvc',),
+            'openshift': ('kubernetes_pvc',),
+        }
+        if self.CONTAINER_ENV not in valid_compute_volume_types.keys():
+            raise ValueError(f"Unsupported value '{self.CONTAINER_ENV}' for CONTAINER_ENV")
+
+        # default to the first allowed type for the given CONTAINER_ENV
+        default_cv_type = valid_compute_volume_types[self.CONTAINER_ENV][0]
         self.COMPUTE_VOLUME_TYPE = env('COMPUTE_VOLUME_TYPE', default_cv_type)
         self.VOLUME_NAME = env('VOLUME_NAME', None)
+
+        allowed = valid_compute_volume_types[self.CONTAINER_ENV]
+        if self.COMPUTE_VOLUME_TYPE not in allowed:
+            raise ValueError(
+                f'COMPUTE_VOLUME_TYPE={self.COMPUTE_VOLUME_TYPE!r} is not '
+                f'valid for CONTAINER_ENV={self.CONTAINER_ENV!r}. Allowed '
+                f'values: {", ".join(repr(v) for v in allowed)}.'
+            )
 
         self.REMOVE_JOBS = env.bool('REMOVE_JOBS', True)
 
