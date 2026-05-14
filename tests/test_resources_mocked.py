@@ -697,6 +697,39 @@ class TestPluginJobFile(NewResourcesTestBase):
         self.assertEqual(content['job_output_path'], 'home/foo/feed/output')
         self.assertIn('results/out.txt', content['rel_file_paths'])
 
+    def test_get_strips_plugin_chrislink_files_for_fslink(self):
+        """A plugin-written .chrislink file in the outgoing dir must be
+        removed from disk and excluded from the returned listing, so it
+        cannot be re-expanded by any later fslink job."""
+        job_id = 'pluginfile-chrislink-1'
+
+        output_path = os.path.join(self.tmpdir, 'home/foo/feed/output')
+        os.makedirs(os.path.join(output_path, 'subdir'), exist_ok=True)
+        with open(os.path.join(output_path, 'legit.txt'), 'w') as f:
+            f.write('legitimate output')
+        evil_top = os.path.join(output_path, 'evil.chrislink')
+        with open(evil_top, 'w') as f:
+            f.write('home/victim/private')
+        evil_nested = os.path.join(output_path, 'subdir', 'evil.chrislink')
+        with open(evil_nested, 'w') as f:
+            f.write('home/victim/private')
+
+        with self.app.test_request_context():
+            url = url_for('api.pluginjobfile', job_id=job_id)
+
+        response = self.client.get(
+            url,
+            query_string={'job_output_path': 'home/foo/feed/output'},
+            headers=self.headers)
+
+        self.assertEqual(response.status_code, 200)
+        content = json.loads(response.data.decode())
+        self.assertIn('legit.txt', content['rel_file_paths'])
+        self.assertNotIn('evil.chrislink', content['rel_file_paths'])
+        self.assertNotIn('subdir/evil.chrislink', content['rel_file_paths'])
+        self.assertFalse(os.path.exists(evil_top))
+        self.assertFalse(os.path.exists(evil_nested))
+
     def test_get_without_query_param_returns_400(self):
         job_id = 'pluginfile-2'
         with self.app.test_request_context():
